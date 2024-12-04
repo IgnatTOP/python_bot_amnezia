@@ -373,7 +373,88 @@ EOL
 }
 
 main() {
-    systemctl list-units --type=service --all | grep -q "$SERVICE_NAME.service" && installed_menu || { install_bot_new; ( sleep 1; rm -- "$SCRIPT_PATH" ) & exit 0; }
+    systemctl list-units --type=service --all | grep -q "$SERVICE_NAME.service" && installed_menu || { 
+        echo "Установка системных зависимостей..."
+        apt-get update
+        apt-get install -y python3 python3-pip wireguard qrencode jq git
+        print_status "Установка системных зависимостей"
+
+        echo "Клонирование репозитория..."
+        cd /home/ignat
+        if [ -d "awg-docker-bot" ]; then
+            cd awg-docker-bot
+            git pull
+        else
+            git clone https://github.com/your-repo/awg-docker-bot.git
+            cd awg-docker-bot
+        fi
+        print_status "Клонирование репозитория"
+
+        echo "Создание директорий..."
+        mkdir -p users files configs
+        print_status "Создание директорий"
+
+        echo "Создание конфигурации..."
+        cat > configs/settings.json << EOL
+{
+    "bot_token": "7782664718:AAFkre94HlYW_RCDqA2YBUc8guo2B5-EpSM",
+    "admin_ids": [487523019],
+    "yookassa": {
+        "shop_id": "993270",
+        "secret_key": "test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE"
+    },
+    "docker_container": "amnezia-node",
+    "endpoint": "http://localhost:8080"
+}
+EOL
+        print_status "Создание конфигурации"
+
+        echo "Установка Python зависимостей..."
+        if [ -f "requirements.txt" ]; then
+            pip3 install -r requirements.txt
+            print_status "Установка Python зависимостей"
+        else
+            echo -e "${RED}[ERROR]${NC} requirements.txt не найден"
+            exit 1
+        fi
+
+        echo "Настройка прав доступа..."
+        if [ -f "add-client.sh" ]; then
+            chmod +x add-client.sh
+        fi
+        if [ -f "awg-decode.py" ]; then
+            chmod +x awg-decode.py
+        fi
+        print_status "Настройка прав доступа"
+
+        echo "Создание systemd сервиса..."
+        cat > /etc/systemd/system/awg-bot.service << EOL
+[Unit]
+Description=AWG Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/ignat/awg-docker-bot
+ExecStart=/usr/bin/python3 awg/bot_manager.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOL
+        print_status "Создание systemd сервиса"
+
+        echo "Настройка и запуск сервиса..."
+        systemctl daemon-reload
+        systemctl enable awg-bot
+        systemctl start awg-bot
+        print_status "Настройка и запуск сервиса"
+
+        echo -e "${GREEN}Установка успешно завершена!${NC}"
+        echo "Бот запущен и добавлен в автозагрузку."
+        ( sleep 1; rm -- "$SCRIPT_PATH" ) & exit 0; 
+    }
 }
 
 main
