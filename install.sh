@@ -458,9 +458,12 @@ uninstall_bot() {
         run_with_spinner "Обновление systemd" "systemctl daemon-reload"
     fi
     
-    # Удаляем файлы
+    # Удаляем файлы и директории
     cd ..
     if [ -d "python_bot_amnezia" ]; then
+        run_with_spinner "Удаление виртуального окружения" "rm -rf python_bot_amnezia/venv"
+        run_with_spinner "Удаление данных пользователей" "rm -rf python_bot_amnezia/users"
+        run_with_spinner "Удаление конфигураций" "rm -rf python_bot_amnezia/files"
         run_with_spinner "Удаление файлов бота" "rm -rf python_bot_amnezia"
     fi
     
