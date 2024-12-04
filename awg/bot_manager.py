@@ -193,7 +193,27 @@ def parse_relative_time(relative_str: str) -> datetime:
         logger.error(f"Ошибка при парсинге относительного времени '{relative_str}': {e}")
         return None
 
-@dp.message_handler(commands=['start', 'help'])
+@dp.message_handler(commands=['start'])
+async def start_command(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "Unknown"
+    full_name = message.from_user.full_name or username
+    
+    # Регистрируем пользователя
+    register_user(user_id, username, full_name)
+    
+    if user_id == admin:
+        keyboard = get_admin_menu_keyboard()
+        await message.answer("🏠 Главное меню администратора:", reply_markup=keyboard)
+    else:
+        keyboard = get_user_menu_keyboard()
+        await message.answer(
+            f"👋 Добро пожаловать в VPN бот!\n\n"
+            f"Для начала работы выберите действие:",
+            reply_markup=keyboard
+        )
+
+@dp.message_handler(commands=['help'])
 async def help_command_handler(message: types.Message):
     if message.chat.id == admin:
         sent_message = await message.answer("Выберите действие:", reply_markup=main_menu_markup)
@@ -207,42 +227,45 @@ async def help_command_handler(message: types.Message):
 
 @dp.message_handler()
 async def handle_messages(message: types.Message):
-    if message.chat.id != admin:
-        await message.answer("У вас нет доступа к этому боту.")
-        return
-    user_state = user_main_messages.get(admin, {}).get('state')
-    if user_state == 'waiting_for_user_name':
-        user_name = message.text.strip()
-        if not all(c.isalnum() or c in "-_" for c in user_name):
-            await message.reply("Имя пользователя может содержать только буквы, цифры, дефисы и подчёркивания.")
-            asyncio.create_task(delete_message_after_delay(sent_message.chat.id, sent_message.message_id, delay=2))
-            return
-        user_main_messages[admin]['client_name'] = user_name
-        user_main_messages[admin]['state'] = 'waiting_for_duration'
-        duration_buttons = [
-            InlineKeyboardButton("1 час", callback_data=f"duration_1h_{user_name}_noipv6"),
-            InlineKeyboardButton("1 день", callback_data=f"duration_1d_{user_name}_noipv6"),
-            InlineKeyboardButton("1 неделя", callback_data=f"duration_1w_{user_name}_noipv6"),
-            InlineKeyboardButton("1 месяц", callback_data=f"duration_1m_{user_name}_noipv6"),
-            InlineKeyboardButton("Без ограничений", callback_data=f"duration_unlimited_{user_name}_noipv6"),
-            InlineKeyboardButton("Домой", callback_data="home")
-        ]
-        duration_markup = InlineKeyboardMarkup(row_width=1).add(*duration_buttons)
-        main_chat_id = user_main_messages[admin].get('chat_id')
-        main_message_id = user_main_messages[admin].get('message_id')
-        if main_chat_id and main_message_id:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text=f"Выберите время действия конфигурации для пользователя **{user_name}**:",
-                parse_mode="Markdown",
-                reply_markup=duration_markup
-            )
-        else:
-            await message.answer("Ошибка: главное сообщение не найдено.")
+    user_id = message.from_user.id
+    
+    if user_id == admin:
+        user_state = user_main_messages.get(admin, {}).get('state')
+        if user_state == 'waiting_for_user_name':
+            user_name = message.text.strip()
+            if not all(c.isalnum() or c in "-_" for c in user_name):
+                await message.reply("Имя пользователя может содержать только буквы, цифры, дефисы и подчёркивания.")
+                return
+            user_main_messages[admin]['client_name'] = user_name
+            user_main_messages[admin]['state'] = 'waiting_for_duration'
+            
+            duration_buttons = [
+                InlineKeyboardButton("1 час", callback_data=f"duration_1h_{user_name}_noipv6"),
+                InlineKeyboardButton("1 день", callback_data=f"duration_1d_{user_name}_noipv6"),
+                InlineKeyboardButton("1 неделя", callback_data=f"duration_1w_{user_name}_noipv6"),
+                InlineKeyboardButton("1 месяц", callback_data=f"duration_1m_{user_name}_noipv6"),
+                InlineKeyboardButton("Без ограничений", callback_data=f"duration_unlimited_{user_name}_noipv6"),
+                InlineKeyboardButton("Домой", callback_data="home")
+            ]
+            duration_markup = InlineKeyboardMarkup(row_width=1).add(*duration_buttons)
+            
+            main_chat_id = user_main_messages[admin].get('chat_id')
+            main_message_id = user_main_messages[admin].get('message_id')
+            
+            if main_chat_id and main_message_id:
+                await bot.edit_message_text(
+                    chat_id=main_chat_id,
+                    message_id=main_message_id,
+                    text=f"Выберите время действия конфигурации для пользователя **{user_name}**:",
+                    parse_mode="Markdown",
+                    reply_markup=duration_markup
+                )
+            else:
+                await message.answer("Ошибка: главное сообщение не найдено")
     else:
-        await message.reply("Неизвестная команда или действие.")
-        asyncio.create_task(delete_message_after_delay(sent_message.chat.id, sent_message.message_id, delay=2))
+        # Для обычных пользователей показываем меню
+        keyboard = get_user_menu_keyboard()
+        await message.answer("Выберите действие:", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data.startswith('add_user'))
 async def prompt_for_user_name(callback_query: types.CallbackQuery):
