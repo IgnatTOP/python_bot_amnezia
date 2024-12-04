@@ -21,7 +21,7 @@ from .db import (get_config, register_user, get_user, load_payments,
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-setting = db.get_config()
+setting = get_config()
 bot_token = setting.get('bot_token')
 admin_id = setting.get('admin_id')
 wg_config_file = setting.get('wg_config_file')

@@ -9,6 +9,7 @@ BLUE=$'\033[0;34m'
 NC=$'\033[0m'
 
 ENABLE_LOGS=false
+USE_PRESET=false
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
@@ -18,9 +19,10 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         --quiet) ENABLE_LOGS=false ;;
         --verbose) ENABLE_LOGS=true ;;
+        --preset) USE_PRESET=true ;;
         *)
             echo -e "${RED}Неизвестный параметр: $1${NC}"
-            echo "Использование: $0 [--quiet|--verbose]"
+            echo "Использование: $0 [--quiet|--verbose] [--preset]"
             exit 1
             ;;
     esac
@@ -290,29 +292,27 @@ validate_yookassa_credentials() {
 }
 
 configure_yookassa() {
-    echo -e "\n${BLUE}Настройка YooKassa платежей${NC}"
-    echo -e "${YELLOW}Данные можно найти в личном кабинете YooKassa: https://yookassa.ru/my${NC}"
+    if [ "$USE_PRESET" = true ] && [ -f "$SCRIPT_DIR/config_preset.json" ]; then
+        echo -e "${BLUE}Используем предустановленные настройки YooKassa...${NC}"
+        SHOP_ID=$(jq -r '.shop_id' "$SCRIPT_DIR/config_preset.json")
+        SECRET_KEY=$(jq -r '.secret_key' "$SCRIPT_DIR/config_preset.json")
+    else
+        echo -e "\n${BLUE}Настройка YooKassa...${NC}"
+        read -p "Введите shop_id: " SHOP_ID
+        read -p "Введите secret_key: " SECRET_KEY
+    fi
 
-    while true; do
-        # Запрос данных YooKassa
-        echo -e "\n${YELLOW}Введите shop_id YooKassa (только цифры):${NC}"
-        read -r yookassa_shop_id
-
-        echo -e "${YELLOW}Введите secret_key YooKassa (начинается с test_ или live_):${NC}"
-        read -r yookassa_secret_key
-
-        # Валидация введенных данных
-        if validate_yookassa_credentials "$yookassa_shop_id" "$yookassa_secret_key"; then
-            break
+    # Валидация введенных данных
+    if ! validate_yookassa_credentials "$SHOP_ID" "$SECRET_KEY"; then
+        echo -e "\n${YELLOW}Хотите попробовать ввести данные снова? (y/n)${NC}"
+        read -r retry
+        if [ "$retry" = "y" ]; then
+            configure_yookassa
         else
-            echo -e "\n${YELLOW}Хотите попробовать ввести данные снова? (y/n)${NC}"
-            read -r retry
-            if [ "$retry" != "y" ]; then
-                echo -e "${RED}Настройка YooKassa прервана${NC}"
-                return 1
-            fi
+            echo -e "${RED}Настройка YooKassa прервана${NC}"
+            return 1
         fi
-    done
+    fi
 
     echo -e "\n${YELLOW}Введите username бота для return_url (без символа @):${NC}"
     read -r bot_username
@@ -334,8 +334,8 @@ YooKassa configuration and settings
 """
 
 YOOKASSA_CONFIG = {
-    "shop_id": "${yookassa_shop_id}",
-    "secret_key": "${yookassa_secret_key}",
+    "shop_id": "${SHOP_ID}",
+    "secret_key": "${SECRET_KEY}",
     "return_url": "https://t.me/${bot_username}"
 }
 
@@ -471,57 +471,34 @@ uninstall_bot() {
 }
 
 configure_main_settings() {
-    echo -e "\n${BLUE}Настройка основных параметров бота${NC}"
-    
-    # Запрос endpoint
-    echo -e "\n${YELLOW}Введите публичный адрес вашего сервера (например: vpn.example.com):${NC}"
-    read -r endpoint
-    while [ -z "$endpoint" ]; do
-        echo -e "${RED}Адрес сервера не может быть пустым${NC}"
-        echo -e "${YELLOW}Попробуйте снова:${NC}"
-        read -r endpoint
-    done
-    
-    # Запрос пути к конфигу WireGuard
-    echo -e "\n${YELLOW}Путь к конфигурационному файлу WireGuard (по умолчанию: /etc/wireguard/wg0.conf):${NC}"
-    read -r wg_config_file
-    wg_config_file=${wg_config_file:-"/etc/wireguard/wg0.conf"}
-    
-    # Запрос имени контейнера
-    echo -e "\n${YELLOW}Имя Docker контейнера WireGuard (по умолчанию: wireguard):${NC}"
-    read -r docker_container
-    docker_container=${docker_container:-"wireguard"}
-    
-    # Запрос токена бота
-    echo -e "\n${YELLOW}Введите токен Telegram бота (получить у @BotFather):${NC}"
-    read -r bot_token
-    while [ -z "$bot_token" ]; do
-        echo -e "${RED}Токен бота не может быть пустым${NC}"
-        echo -e "${YELLOW}Попробуйте снова:${NC}"
-        read -r bot_token
-    done
-    
-    # Запрос ID администраторов
-    echo -e "\n${YELLOW}Введите ID администраторов бота через запятую (например: 123456789,987654321):${NC}"
-    read -r admin_ids_input
-    while [ -z "$admin_ids_input" ]; do
-        echo -e "${RED}Должен быть указан хотя бы один администратор${NC}"
-        echo -e "${YELLOW}Попробуйте снова:${NC}"
-        read -r admin_ids_input
-    done
-    
-    # Преобразование строки с ID в массив JSON
-    admin_ids_json="[$(echo "$admin_ids_input" | sed 's/,/,/g')]"
-    
+    if [ "$USE_PRESET" = true ] && [ -f "$SCRIPT_DIR/config_preset.json" ]; then
+        echo -e "${BLUE}Используем предустановленные основные настройки...${NC}"
+        ENDPOINT=$(jq -r '.endpoint' "$SCRIPT_DIR/config_preset.json")
+        WG_CONFIG_FILE=$(jq -r '.wg_config_file' "$SCRIPT_DIR/config_preset.json")
+        DOCKER_CONTAINER=$(jq -r '.docker_container' "$SCRIPT_DIR/config_preset.json")
+        BOT_TOKEN=$(jq -r '.bot_token' "$SCRIPT_DIR/config_preset.json")
+        ADMIN_IDS=$(jq -r '.admin_ids' "$SCRIPT_DIR/config_preset.json")
+    else
+        echo -e "\n${BLUE}Настройка основных параметров бота...${NC}"
+        read -p "Введите публичный адрес вашего сервера (например: vpn.example.com): " ENDPOINT
+        read -p "Введите путь к конфигурационному файлу WireGuard (по умолчанию: /etc/wireguard/wg0.conf): " WG_CONFIG_FILE
+        WG_CONFIG_FILE=${WG_CONFIG_FILE:-"/etc/wireguard/wg0.conf"}
+        read -p "Введите имя Docker контейнера WireGuard (по умолчанию: wireguard): " DOCKER_CONTAINER
+        DOCKER_CONTAINER=${DOCKER_CONTAINER:-"wireguard"}
+        read -p "Введите токен Telegram бота (получить у @BotFather): " BOT_TOKEN
+        read -p "Введите ID администраторов бота через запятую (например: 123456789,987654321): " ADMIN_IDS_INPUT
+        ADMIN_IDS="[$(echo "$ADMIN_IDS_INPUT" | sed 's/,/,/g')]"
+    fi
+
     # Создание конфигурационного файла
     mkdir -p awg/config
     cat > awg/config/config.json << EOL
 {
-    "endpoint": "${endpoint}",
-    "wg_config_file": "${wg_config_file}",
-    "docker_container": "${docker_container}",
-    "bot_token": "${bot_token}",
-    "admin_ids": ${admin_ids_json},
+    "endpoint": "${ENDPOINT}",
+    "wg_config_file": "${WG_CONFIG_FILE}",
+    "docker_container": "${DOCKER_CONTAINER}",
+    "bot_token": "${BOT_TOKEN}",
+    "admin_ids": ${ADMIN_IDS},
     "yookassa": {
         "shop_id": "",
         "secret_key": ""
