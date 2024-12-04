@@ -195,27 +195,14 @@ check_python() {
 
     # Проверяем версию Python
     PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-    MAJOR_VERSION=$(echo $PYTHON_VERSION | cut -d. -f1)
-    MINOR_VERSION=$(echo $PYTHON_VERSION | cut -d. -f2)
-    
-    if [ "$MAJOR_VERSION" -lt 3 ] || ([ "$MAJOR_VERSION" -eq 3 ] && [ "$MINOR_VERSION" -lt 7 ]); then
+    if (( $(echo "$PYTHON_VERSION < 3.7" | bc -l) )); then
         echo -e "${RED}Требуется Python версии 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
         exit 1
     fi
 
     echo -e "${GREEN}Python $PYTHON_VERSION установлен${NC}"
 
-    # Установка # Удаляем старую установку если она есть
-    rm -rf python_bot_amnezia
-    
-    # Скачиваем установщик
-    curl -O https://raw.githubusercontent.com/IgnatTOP/python_bot_amnezia/main/install.sh
-    
-    # Делаем скрипт исполняемым
-    chmod +x install.sh
-    
-    # Запускаем установку
-    ./install.sh если он отсутствует
+    # Установка pip если он отсутствует
     if ! command -v pip3 &>/dev/null; then
         echo -e "${YELLOW}pip3 не установлен. Устанавливаем...${NC}"
         run_with_spinner "Установка pip3" "sudo apt-get install python3-pip -y -qq"
@@ -227,10 +214,16 @@ check_python() {
 
 install_dependencies() {
     # Установка системных зависимостей
-    run_with_spinner "Установка системных зависимостей" "sudo apt-get install qrencode jq net-tools iptables resolvconf git bc -y -qq"
+    run_with_spinner "Установка системных зависимостей" "sudo apt-get install qrencode jq net-tools iptables resolvconf git bc python3-venv -y -qq"
+    
+    # Создание и активация виртуального окружения
+    if [ ! -d "venv" ]; then
+        run_with_spinner "Создание виртуального окружения" "python3 -m venv venv"
+    fi
+    source venv/bin/activate
     
     # Установка Python зависимостей
-    run_with_spinner "Установка Python зависимостей" "python3 -m pip install -r requirements.txt"
+    run_with_spinner "Установка Python зависимостей" "pip install --upgrade pip && pip install -r requirements.txt"
     
     # Создание и настройка конфигурационных директорий
     run_with_spinner "Создание конфигурационных директорий" "mkdir -p awg/config files"
@@ -245,11 +238,12 @@ install_dependencies() {
         echo -e "${YELLOW}Конфигурация YooKassa уже существует. Хотите перенастроить? (y/n)${NC}"
         read -r answer
         if [ "$answer" = "y" ]; then
-            if ! configure_yookassa; then
-                echo -e "${RED}Ошибка настройки YooKassa. Старая конфигурация сохранена.${NC}"
-            fi
+            configure_yookassa
         fi
     fi
+    
+    # Деактивация виртуального окружения
+    deactivate
 }
 
 validate_yookassa_credentials() {
@@ -267,9 +261,10 @@ validate_yookassa_credentials() {
         return 1
     fi
     
-    # Проверка формата secret_key (должен содержать TEST: или PROD:)
-    if ! [[ "$secret_key" =~ ^(TEST|PROD):[0-9]+$ ]]; then
-        echo -e "${RED}Ошибка: secret_key должен быть в формате TEST:XXXXX или PROD:XXXXX${NC}"
+    # Проверка формата secret_key (должен быть в правильном формате)
+    if ! [[ "$secret_key" =~ ^(test|live)_[A-Za-z0-9_\-]+$ ]]; then
+        echo -e "${RED}Ошибка: неверный формат secret_key${NC}"
+        echo -e "${YELLOW}Формат должен быть: test_XXXXX или live_XXXXX${NC}"
         return 1
     fi
     
@@ -278,20 +273,21 @@ validate_yookassa_credentials() {
 
 configure_yookassa() {
     echo -e "\n${BLUE}Настройка YooKassa платежей${NC}"
+    echo -e "${YELLOW}Данные можно найти в личном кабинете YooKassa: https://yookassa.ru/my${NC}"
     
     while true; do
         # Запрос данных YooKassa
-        echo -e "${YELLOW}Введите shop_id YooKassa:${NC}"
+        echo -e "\n${YELLOW}Введите shop_id YooKassa (только цифры):${NC}"
         read -r yookassa_shop_id
         
-        echo -e "${YELLOW}Введите secret_key YooKassa:${NC}"
+        echo -e "${YELLOW}Введите secret_key YooKassa (начинается с test_ или live_):${NC}"
         read -r yookassa_secret_key
         
         # Валидация введенных данных
         if validate_yookassa_credentials "$yookassa_shop_id" "$yookassa_secret_key"; then
             break
         else
-            echo -e "${YELLOW}Хотите попробовать ввести данные снова? (y/n)${NC}"
+            echo -e "\n${YELLOW}Хотите попробовать ввести данные снова? (y/n)${NC}"
             read -r retry
             if [ "$retry" != "y" ]; then
                 echo -e "${RED}Настройка YooKassa прервана${NC}"
@@ -300,15 +296,20 @@ configure_yookassa() {
         fi
     done
     
-    echo -e "${YELLOW}Введите username бота для return_url (например: my_bot):${NC}"
+    echo -e "\n${YELLOW}Введите username бота для return_url (без символа @):${NC}"
     read -r bot_username
     
-    while [ -z "$bot_username" ]; do
-        echo -e "${RED}Username бота не может быть пустым. Попробуйте снова:${NC}"
+    while [ -z "$bot_username" ] || [[ "$bot_username" == @* ]]; do
+        if [ -z "$bot_username" ]; then
+            echo -e "${RED}Username бота не может быть пустым.${NC}"
+        else
+            echo -e "${RED}Username бота должен быть без символа @${NC}"
+        fi
+        echo -e "${YELLOW}Попробуйте снова:${NC}"
         read -r bot_username
     done
     
-    # Создание конфигурационного файла с правильными отступами
+    # Создание конфигурационного файла
     cat > awg/config/yookassa.py << EOL
 """
 YooKassa configuration and settings
@@ -334,8 +335,8 @@ SUBSCRIPTION_DAYS = {
     "12_months": 365
 }
 EOL
-
-    echo -e "${GREEN}✓ Конфигурация YooKassa сохранена${NC}"
+    
+    echo -e "${GREEN}Конфигурация YooKassa успешно сохранена${NC}"
     return 0
 }
 
