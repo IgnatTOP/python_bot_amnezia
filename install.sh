@@ -225,7 +225,7 @@ clone_repository() {
         return 0
     fi
     
-    run_with_spinner "Клонирование репозитория" "git clone https://github.com/JB-SelfCompany/awg-docker-bot.git >/dev/null 2>&1"
+    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git >/dev/null 2>&1"
     cd awg-docker-bot || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
 }
 
