@@ -218,6 +218,25 @@ install_and_configure_needrestart() {
     grep -q 'nrconf{restart} = "a";' /etc/needrestart/needrestart.conf || echo 'nrconf{restart} = "a";' | sudo tee /etc/needrestart/needrestart.conf >/dev/null 2>&1
 }
 
+create_config() {
+    mkdir -p users
+    mkdir -p files
+    mkdir -p configs
+
+    cat > configs/settings.json << EOL
+{
+    "bot_token": "7782664718:AAFkre94HlYW_RCDqA2YBUc8guo2B5-EpSM",
+    "admin_ids": [487523019],
+    "yookassa": {
+        "shop_id": "993270",
+        "secret_key": "test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE"
+    },
+    "docker_container": "amnezia-node",
+    "endpoint": "http://localhost:8080"
+}
+EOL
+}
+
 clone_repository() {
     if [[ -d "python_bot_amnezia" ]]; then
         echo -e "\n${YELLOW}Репозиторий существует${NC}"
@@ -311,6 +330,7 @@ install_bot() {
     check_python
     install_dependencies
     install_and_configure_needrestart
+    create_config
     clone_repository
     setup_venv
     set_permissions
