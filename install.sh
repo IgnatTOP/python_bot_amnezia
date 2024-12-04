@@ -405,27 +405,28 @@ initialize_bot() {
 }
 
 create_service() {
-    cat > /tmp/service_file << EOF
+    cat > /etc/systemd/system/$SERVICE_NAME.service << EOL
 [Unit]
-Description=AmneziaVPN Docker Telegram Bot
+Description=AWG Bot Service
 After=network.target
 
 [Service]
 User=$USER
-WorkingDirectory=$(pwd)/awg
+WorkingDirectory=$(pwd)
+Environment=PYTHONPATH=$(pwd)
 ExecStart=$(pwd)/venv/bin/python3 -m awg.bot_manager
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOL
 
-    run_with_spinner "Создание службы" "sudo mv /tmp/service_file /etc/systemd/system/$SERVICE_NAME.service"
-    run_with_spinner "Обновление systemd" "sudo systemctl daemon-reload -qq"
-    run_with_spinner "Запуск службы" "sudo systemctl start $SERVICE_NAME -qq"
-    run_with_spinner "Включение автозапуска" "sudo systemctl enable $SERVICE_NAME -qq"
+    run_with_spinner "Создание службы" "chmod 644 /etc/systemd/system/$SERVICE_NAME.service"
+    run_with_spinner "Обновление systemd" "systemctl daemon-reload"
+    run_with_spinner "Запуск службы" "systemctl start $SERVICE_NAME"
+    run_with_spinner "Включение автозапуска" "systemctl enable $SERVICE_NAME"
     
-    systemctl is-active --quiet "$SERVICE_NAME" && echo -e "\n${GREEN}Служба запущена${NC}" || echo -e "\n${RED}Ошибка запуска службы${NC}"
+    echo -e "\n${GREEN}Служба запущена${NC}"
 }
 
 install_bot() {

@@ -1,4 +1,4 @@
-import db
+from . import db
 import aiohttp
 import logging
 import asyncio
