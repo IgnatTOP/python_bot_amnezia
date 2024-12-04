@@ -26,6 +26,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from payment import PaymentManager, LICENSE_PRICES
 import random
 import string
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.contrib.fsm_storage.redis import RedisStorage2
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -91,8 +95,8 @@ CACHE_TTL = timedelta(hours=24)
 
 TRAFFIC_LIMITS = ["5 GB", "10 GB", "30 GB", "100 GB", "Неограниченно"]
 
-def get_interface_name():
-    return os.path.basename(WG_CONFIG_FILE).split('.')[0]
+class BroadcastStates(StatesGroup):
+    waiting_for_message = State()
 
 async def load_isp_cache():
     global isp_cache
@@ -1202,7 +1206,7 @@ async def select_plan_callback(callback_query: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
 async def check_payment_callback(callback_query: types.CallbackQuery):
     payment_id = callback_query.data.replace('check_payment_', '')
-    user_id = callback_query.from_user.id
+    user_id = str(callback_query.from_user.id)
     
     try:
         is_paid = payment_manager.check_payment(payment_id)
@@ -1229,28 +1233,39 @@ async def check_payment_callback(callback_query: types.CallbackQuery):
                 
             expiration_date = datetime.now() + timedelta(days=days)
             
-            # Generate VPN configuration
-            config_data = await generate_vpn_config(str(user_id))
-            if not config_data:
-                raise Exception("Failed to generate VPN configuration")
-            
-            # Save license information
-            db.set_user_expiration(str(user_id), expiration_date, "Неограниченно")
-            
-            # Send configuration to user
-            await send_vpn_config(callback_query.message.chat.id, config_data)
+            # Save license information first
+            db.set_user_expiration(user_id, expiration_date, "Неограниченно")
             
             success_text = (
                 "✅ Оплата успешно произведена!\n\n"
                 f"📅 Срок действия: {expiration_date.strftime('%d.%m.%Y')}\n"
                 "📊 Трафик: Неограниченно\n\n"
-                "⚙️ Конфигурация VPN отправлена выше.\n"
-                "📱 Установите приложение WireGuard для вашей платформы:\n"
-                "• iOS: https://apps.apple.com/app/wireguard/id1441195209\n"
-                "• Android: https://play.google.com/store/apps/details?id=com.wireguard.android\n"
-                "• Windows: https://download.wireguard.com/windows-client/wireguard-installer.exe\n"
-                "• macOS: https://apps.apple.com/app/wireguard/id1451685025"
             )
+            
+            # Try to generate and send VPN config
+            try:
+                config_data = await generate_vpn_config(user_id)
+                if config_data:
+                    await send_vpn_config(callback_query.message.chat.id, config_data)
+                    success_text += (
+                        "⚙️ Конфигурация VPN отправлена выше.\n"
+                        "📱 Установите приложение WireGuard для вашей платформы:\n"
+                        "• iOS: https://apps.apple.com/app/wireguard/id1441195209\n"
+                        "• Android: https://play.google.com/store/apps/details?id=com.wireguard.android\n"
+                        "• Windows: https://download.wireguard.com/windows-client/wireguard-installer.exe\n"
+                        "• macOS: https://apps.apple.com/app/wireguard/id1451685025"
+                    )
+                else:
+                    success_text += (
+                        "⚠️ Не удалось сгенерировать конфигурацию VPN.\n"
+                        "Пожалуйста, обратитесь в поддержку или попробуйте позже через меню 'Информация о лицензии'"
+                    )
+            except Exception as e:
+                logger.error(f"Error generating VPN config for user {user_id}: {e}")
+                success_text += (
+                    "⚠️ Произошла ошибка при генерации конфигурации VPN.\n"
+                    "Пожалуйста, обратитесь в поддержку или попробуйте позже через меню 'Информация о лицензии'"
+                )
             
             markup = InlineKeyboardMarkup().add(
                 InlineKeyboardButton("« Главное меню", callback_data="return_home")
@@ -1367,5 +1382,253 @@ async def handle_broadcast_message(message: types.Message):
         f"Ошибок: {failed_count}",
         reply_markup=main_menu_markup
     )
+
+async def generate_vpn_config(username: str) -> dict:
+    """Generate VPN configuration for a user"""
+    try:
+        # Create VPN configuration using existing scripts
+        result = await asyncio.create_subprocess_shell(
+            f'./newclient.sh {username}',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await result.communicate()
+        
+        if result.returncode != 0:
+            logger.error(f"Error generating VPN config: {stderr.decode()}")
+            return None
+            
+        config_path = f'/etc/wireguard/clients/{username}.conf'
+        qr_path = f'/etc/wireguard/clients/{username}_qr.png'
+        
+        if not os.path.exists(config_path) or not os.path.exists(qr_path):
+            logger.error(f"Config files not found after generation")
+            return None
+            
+        return {
+            'config_path': config_path,
+            'qr_path': qr_path
+        }
+    except Exception as e:
+        logger.error(f"Error in generate_vpn_config: {e}")
+        return None
+
+async def send_vpn_config(chat_id: int, config_data: dict):
+    """Send VPN configuration file and QR code to user"""
+    if not config_data:
+        raise Exception("No config data provided")
+        
+    try:
+        # Send configuration file
+        async with aiofiles.open(config_data['config_path'], 'rb') as config_file:
+            await bot.send_document(
+                chat_id,
+                types.InputFile(config_file.name),
+                caption="📝 Конфигурационный файл WireGuard"
+            )
+        
+        # Send QR code
+        async with aiofiles.open(config_data['qr_path'], 'rb') as qr_file:
+            await bot.send_photo(
+                chat_id,
+                types.InputFile(qr_file.name),
+                caption="📱 QR-код для быстрой настройки"
+            )
+    except Exception as e:
+        logger.error(f"Error sending VPN config: {e}")
+        raise Exception("Failed to send VPN configuration")
+
+@dp.callback_query_handler(lambda c: c.data == "license_info")
+async def license_info_callback(callback_query: types.CallbackQuery):
+    user_id = str(callback_query.from_user.id)
+    try:
+        expiration = db.get_user_expiration(user_id)
+        if not expiration:
+            await callback_query.message.edit_text(
+                "❌ У вас нет активной лицензии",
+                reply_markup=InlineKeyboardMarkup().add(
+                    InlineKeyboardButton("« Назад", callback_data="return_home")
+                )
+            )
+            return
+            
+        expiration_date = datetime.fromisoformat(expiration)
+        days_left = (expiration_date - datetime.now()).days
+        
+        info_text = (
+            "📋 Информация о лицензии:\n\n"
+            f"📅 Действует до: {expiration_date.strftime('%d.%m.%Y')}\n"
+            f"⏳ Осталось дней: {days_left}\n"
+            "📊 Трафик: Неограниченно\n"
+        )
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("🔄 Обновить конфигурацию", callback_data="regenerate_key"),
+            InlineKeyboardButton("❌ Удалить лицензию", callback_data="delete_license"),
+            InlineKeyboardButton("« Назад", callback_data="return_home")
+        )
+        
+        await callback_query.message.edit_text(info_text, reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Error in license_info_callback: {e}")
+        await callback_query.answer("Произошла ошибка при получении информации о лицензии", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data == "regenerate_key")
+async def regenerate_key_callback(callback_query: types.CallbackQuery):
+    user_id = str(callback_query.from_user.id)
+    try:
+        # Проверяем наличие активной лицензии
+        if not db.get_user_expiration(user_id):
+            await callback_query.answer("У вас нет активной лицензии", show_alert=True)
+            return
+            
+        # Генерируем новую конфигурацию
+        config_data = await generate_vpn_config(user_id)
+        if not config_data:
+            raise Exception("Failed to generate new configuration")
+            
+        # Отправляем новую конфигурацию
+        await send_vpn_config(callback_query.message.chat.id, config_data)
+        
+        await callback_query.message.edit_text(
+            "✅ Новая конфигурация успешно сгенерирована и отправлена выше",
+            reply_markup=InlineKeyboardMarkup().add(
+                InlineKeyboardButton("« Назад", callback_data="return_home")
+            )
+        )
+    except Exception as e:
+        logger.error(f"Error in regenerate_key_callback: {e}")
+        await callback_query.answer("Произошла ошибка при обновлении конфигурации", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data == "delete_license")
+async def delete_license_callback(callback_query: types.CallbackQuery):
+    user_id = str(callback_query.from_user.id)
+    try:
+        if not db.get_user_expiration(user_id):
+            await callback_query.answer("У вас нет активной лицензии", show_alert=True)
+            return
+            
+        # Удаляем лицензию
+        db.remove_user_expiration(user_id)
+        
+        # Деактивируем пользователя в WireGuard
+        await deactivate_user(user_id)
+        
+        await callback_query.message.edit_text(
+            "✅ Лицензия успешно удалена",
+            reply_markup=InlineKeyboardMarkup().add(
+                InlineKeyboardButton("« Назад", callback_data="return_home")
+            )
+        )
+    except Exception as e:
+        logger.error(f"Error in delete_license_callback: {e}")
+        await callback_query.answer("Произошла ошибка при удалении лицензии", show_alert=True)
+
+@dp.message_handler(commands=['broadcast'])
+async def broadcast_command(message: types.Message):
+    """Start broadcast message creation"""
+    await BroadcastStates.waiting_for_message.set()
+    await message.reply(
+        "📢 Введите сообщение для рассылки\n"
+        "Поддерживается HTML-форматирование\n"
+        "Для отмены используйте /cancel",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+
+@dp.message_handler(state=BroadcastStates.waiting_for_message)
+async def process_broadcast_message(message: types.Message, state: FSMContext):
+    """Process broadcast message and start sending"""
+    if message.text == '/cancel':
+        await state.finish()
+        await message.reply("Рассылка отменена", reply_markup=get_admin_keyboard())
+        return
+        
+    try:
+        # Store the message
+        await state.update_data(broadcast_message=message.text)
+        
+        # Ask for confirmation
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_broadcast"),
+            InlineKeyboardButton("❌ Отменить", callback_data="cancel_broadcast")
+        )
+        
+        preview = f"📢 Предпросмотр сообщения:\n\n{message.text}"
+        await message.reply(preview, reply_markup=markup, parse_mode=types.ParseMode.HTML)
+        
+    except Exception as e:
+        logger.error(f"Error in process_broadcast_message: {e}")
+        await message.reply("Произошла ошибка при подготовке рассылки")
+        await state.finish()
+
+@dp.callback_query_handler(lambda c: c.data in ["confirm_broadcast", "cancel_broadcast"], state=BroadcastStates.waiting_for_message)
+async def broadcast_confirmation(callback_query: types.CallbackQuery, state: FSMContext):
+    """Handle broadcast confirmation"""
+    if callback_query.data == "cancel_broadcast":
+        await state.finish()
+        await callback_query.message.edit_text("Рассылка отменена")
+        return
+        
+    try:
+        # Get the message
+        data = await state.get_data()
+        message_text = data['broadcast_message']
+        
+        # Get all users
+        users = db.get_all_users()
+        total_users = len(users)
+        
+        if not users:
+            await callback_query.message.edit_text("❌ Нет пользователей для рассылки")
+            await state.finish()
+            return
+            
+        # Start progress message
+        progress_message = await callback_query.message.edit_text(
+            "⏳ Начинаем рассылку...\n"
+            f"Всего пользователей: {total_users}"
+        )
+        
+        # Send messages
+        success_count = 0
+        error_count = 0
+        
+        for i, user_id in enumerate(users, 1):
+            try:
+                await bot.send_message(
+                    user_id,
+                    message_text,
+                    parse_mode=types.ParseMode.HTML
+                )
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Error sending broadcast to {user_id}: {e}")
+                error_count += 1
+                
+            # Update progress every 10 users
+            if i % 10 == 0:
+                await progress_message.edit_text(
+                    f"⏳ Отправлено: {i}/{total_users}\n"
+                    f"✅ Успешно: {success_count}\n"
+                    f"❌ Ошибок: {error_count}"
+                )
+                
+        # Final status
+        await progress_message.edit_text(
+            "✅ Рассылка завершена\n\n"
+            f"📊 Статистика:\n"
+            f"👥 Всего пользователей: {total_users}\n"
+            f"✅ Успешно доставлено: {success_count}\n"
+            f"❌ Ошибок доставки: {error_count}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in broadcast_confirmation: {e}")
+        await callback_query.message.edit_text("❌ Произошла ошибка при выполнении рассылки")
+        
+    finally:
+        await state.finish()
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)
