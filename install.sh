@@ -201,7 +201,7 @@ check_python() {
     MIN_VERSION="3.07"  # Минимальная версия 3.7
     
     if (( $(echo "$VERSION_NORMALIZED < $MIN_VERSION" | bc -l) )); then
-        echo -e "${RED}Требуется Python версии 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
+        echo -e "${RED}Требуется Python версииЯЯЯЯ 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
         return 1
     fi
 
