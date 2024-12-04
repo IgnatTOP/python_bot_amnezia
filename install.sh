@@ -18,7 +18,7 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         --quiet) ENABLE_LOGS=false ;;
         --verbose) ENABLE_LOGS=true ;;
-        *) 
+        *)
             echo -e "${RED}Неизвестный параметр: $1${NC}"
             echo "Использование: $0 [--quiet|--verbose]"
             exit 1
@@ -74,7 +74,7 @@ run_with_spinner() {
 
         wait "$pid"
         local status=$?
-        
+
         if [ $status -eq 0 ]; then
             printf "\r${BLUE}${description}...${NC} ${spinner:i%${#spinner}:1} ${GREEN}Done!${NC}\n\n"
         else
@@ -94,7 +94,7 @@ run_with_spinner() {
 
 check_updates() {
     echo -e "\n${BLUE}Проверка обновлений...${NC}"
-    
+
     # Проверяем наличие git репозитория
     if [ ! -d ".git" ]; then
         echo -e "${YELLOW}Репозиторий git не найден. Клонируем заново...${NC}"
@@ -107,7 +107,7 @@ check_updates() {
 
     # Если .git существует, проверяем обновления
     git remote update >/dev/null 2>&1
-    
+
     UPSTREAM=${1:-'@{u}'}
     LOCAL=$(git rev-parse @)
     REMOTE=$(git rev-parse "$UPSTREAM")
@@ -150,7 +150,7 @@ service_control_menu() {
         echo -e "${GREEN}3${NC}. Переустановить службу"
         echo -e "${RED}4${NC}. Удалить службу"
         echo -e "${YELLOW}5${NC}. Назад"
-        
+
         echo -ne "\n${BLUE}Выберите действие:${NC} "
         read action
         case $action in
@@ -174,7 +174,7 @@ installed_menu() {
         echo "4. Выход"
         echo
         read -p "Выберите действие: " choice
-        
+
         case $choice in
             1)
                 check_updates
@@ -213,11 +213,11 @@ check_python() {
 
     # Проверяем версию Python
     PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-    
+
     # Преобразуем версию в числовой формат для сравнения (например, 3.7 -> 3.07)
     VERSION_NORMALIZED=$(echo "$PYTHON_VERSION" | awk -F. '{ printf("%d.%02d\n", $1, $2) }')
     MIN_VERSION="3.07"  # Минимальная версия 3.7
-    
+
     if (( $(echo "$VERSION_NORMALIZED < $MIN_VERSION" | bc -l) )); then
         echo -e "${RED}Требуется Python версии 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
         return 1
@@ -233,40 +233,31 @@ check_python() {
 
     # Обновление pip до последней версии
     run_with_spinner "Обновление pip" "python3 -m pip install --upgrade pip -q"
-    
+
     return 0
 }
 
 install_dependencies() {
     # Установка системных зависимостей
     run_with_spinner "Установка системных зависимостей" "sudo apt-get install qrencode jq net-tools iptables resolvconf git bc python3-venv -y -qq"
-    
+
     # Создание и активация виртуального окружения
     if [ ! -d "venv" ]; then
         run_with_spinner "Создание виртуального окружения" "python3 -m venv venv"
     fi
     source venv/bin/activate
-    
+
     # Установка Python зависимостей
     run_with_spinner "Установка Python зависимостей" "pip install --upgrade pip && pip install -r requirements.txt"
-    
+
     # Создание и настройка конфигурационных директорий
     run_with_spinner "Создание конфигурационных директорий" "mkdir -p awg/config files"
-    
+
     # Настройка YooKassa если конфигурация отсутствует
     if [ ! -f "awg/config/yookassa.py" ]; then
-        if ! configure_yookassa; then
-            echo -e "${RED}Ошибка настройки YooKassa. Файл конфигурации не создан.${NC}"
-            echo -e "${YELLOW}Вы можете настроить YooKassa позже, отредактировав файл awg/config/yookassa.py${NC}"
-        fi
-    else
-        echo -e "${YELLOW}Конфигурация YooKassa уже существует. Хотите перенастроить? (y/n)${NC}"
-        read -r answer
-        if [ "$answer" = "y" ]; then
-            configure_yookassa
-        fi
+        configure_yookassa
     fi
-    
+
     # Деактивация виртуального окружения
     deactivate
 }
@@ -274,18 +265,18 @@ install_dependencies() {
 validate_yookassa_credentials() {
     local shop_id="$1"
     local secret_key="$2"
-    
+
     if [ -z "$shop_id" ] || [ -z "$secret_key" ]; then
         echo -e "${RED}Ошибка: shop_id и secret_key не могут быть пустыми${NC}"
         return 1
     fi
-    
+
     # Проверка формата shop_id (должен быть числовым)
     if ! [[ "$shop_id" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}Ошибка: shop_id должен содержать только цифры${NC}"
         return 1
     fi
-    
+
     # Проверка формата secret_key (поддержка старого и нового формата)
     if ! [[ "$secret_key" =~ ^(test|live)_[A-Za-z0-9_\-]+$ ]] && ! [[ "$secret_key" =~ ^(TEST|PROD):[0-9]+$ ]]; then
         echo -e "${RED}Ошибка: неверный формат secret_key${NC}"
@@ -294,22 +285,22 @@ validate_yookassa_credentials() {
         echo -e "2. Старый формат: TEST:XXXXX или PROD:XXXXX"
         return 1
     fi
-    
+
     return 0
 }
 
 configure_yookassa() {
     echo -e "\n${BLUE}Настройка YooKassa платежей${NC}"
     echo -e "${YELLOW}Данные можно найти в личном кабинете YooKassa: https://yookassa.ru/my${NC}"
-    
+
     while true; do
         # Запрос данных YooKassa
         echo -e "\n${YELLOW}Введите shop_id YooKassa (только цифры):${NC}"
         read -r yookassa_shop_id
-        
+
         echo -e "${YELLOW}Введите secret_key YooKassa (начинается с test_ или live_):${NC}"
         read -r yookassa_secret_key
-        
+
         # Валидация введенных данных
         if validate_yookassa_credentials "$yookassa_shop_id" "$yookassa_secret_key"; then
             break
@@ -322,10 +313,10 @@ configure_yookassa() {
             fi
         fi
     done
-    
+
     echo -e "\n${YELLOW}Введите username бота для return_url (без символа @):${NC}"
     read -r bot_username
-    
+
     while [ -z "$bot_username" ] || [[ "$bot_username" == @* ]]; do
         if [ -z "$bot_username" ]; then
             echo -e "${RED}Username бота не может быть пустым.${NC}"
@@ -335,7 +326,7 @@ configure_yookassa() {
         echo -e "${YELLOW}Попробуйте снова:${NC}"
         read -r bot_username
     done
-    
+
     # Создание конфигурационного файла
     cat > awg/config/yookassa.py << EOL
 """
@@ -362,7 +353,7 @@ SUBSCRIPTION_DAYS = {
     "12_months": 365
 }
 EOL
-    
+
     echo -e "${GREEN}Конфигурация YooKassa успешно сохранена${NC}"
     return 0
 }
@@ -379,45 +370,45 @@ clone_repository() {
         cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
         return 0
     fi
-    
+
     run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git >/dev/null 2>&1"
     cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
 }
 
 setup_venv() {
     echo -e "\n${BLUE}Настройка виртуального окружения...${NC}"
-    
+
     # Создание виртуального окружения если оно не существует
     if [ ! -d "venv" ]; then
         python3 -m venv venv
     fi
-    
+
     # Активация виртуального окружения
     source venv/bin/activate
-    
+
     # Установка зависимостей в виртуальное окружение
     pip install --upgrade pip
     pip install -r requirements.txt
-    
+
     # Создание __init__.py файлов для корректной работы импортов
     touch awg/__init__.py
     touch awg/config/__init__.py
-    
+
     # Деактивация виртуального окружения
     deactivate
-    
+
     echo -e "${GREEN}✓ Виртуальное окружение настроено${NC}"
 }
 
 initialize_bot() {
     echo -e "\n${BLUE}Инициализация бота...${NC}"
-    
+
     # Активация виртуального окружения
     source venv/bin/activate
-    
+
     # Запуск бота с правильным PYTHONPATH
     PYTHONPATH=$(pwd) python3 -m awg.bot_manager
-    
+
     # Деактивация виртуального окружения
     deactivate
 }
@@ -443,13 +434,13 @@ EOL
     run_with_spinner "Обновление systemd" "systemctl daemon-reload"
     run_with_spinner "Запуск службы" "systemctl start $SERVICE_NAME"
     run_with_spinner "Включение автозапуска" "systemctl enable $SERVICE_NAME"
-    
+
     echo -e "\n${GREEN}Служба запущена${NC}"
 }
 
 uninstall_bot() {
     echo -e "\n${YELLOW}Удаление AWG Docker Telegram Bot...${NC}"
-    
+
     # Останавливаем и удаляем службу
     if systemctl is-active --quiet $SERVICE_NAME; then
         run_with_spinner "Остановка службы" "systemctl stop $SERVICE_NAME"
@@ -457,7 +448,7 @@ uninstall_bot() {
         run_with_spinner "Удаление службы" "rm -f /etc/systemd/system/$SERVICE_NAME.service"
         run_with_spinner "Обновление systemd" "systemctl daemon-reload"
     fi
-    
+
     # Удаляем файлы и директории
     cd ..
     if [ -d "python_bot_amnezia" ]; then
@@ -466,7 +457,7 @@ uninstall_bot() {
         run_with_spinner "Удаление конфигураций" "rm -rf python_bot_amnezia/files"
         run_with_spinner "Удаление файлов бота" "rm -rf python_bot_amnezia"
     fi
-    
+
     echo -e "${GREEN}Бот успешно удален${NC}"
     exit 0
 }
@@ -483,7 +474,6 @@ install_bot() {
     install_and_configure_needrestart
     clone_repository
     setup_venv
-    configure_yookassa
     initialize_bot
     create_service
 }
