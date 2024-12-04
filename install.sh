@@ -15,12 +15,25 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_NAME"
 
+# Debug output
+echo "Debug: Starting script with arguments: $@"
+
 while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --quiet) ENABLE_LOGS=false ;;
-        --verbose) ENABLE_LOGS=true ;;
-        --preset) USE_PRESET=true ;;
-        *)
+    echo "Debug: Processing argument: $1"
+    case "$1" in
+        --quiet) 
+            ENABLE_LOGS=false
+            echo "Debug: Set ENABLE_LOGS to false"
+            ;;
+        --verbose) 
+            ENABLE_LOGS=true
+            echo "Debug: Set ENABLE_LOGS to true"
+            ;;
+        --preset) 
+            USE_PRESET=true
+            echo "Debug: Set USE_PRESET to true"
+            ;;
+        *) 
             echo -e "${RED}Неизвестный параметр: $1${NC}"
             echo "Использование: $0 [--quiet|--verbose] [--preset]"
             exit 1
@@ -28,6 +41,8 @@ while [[ "$#" -gt 0 ]]; do
     esac
     shift
 done
+
+echo "Debug: Final settings - ENABLE_LOGS: $ENABLE_LOGS, USE_PRESET: $USE_PRESET"
 
 get_ubuntu_version() {
     if command -v lsb_release &>/dev/null; then
@@ -240,6 +255,14 @@ check_python() {
 }
 
 install_dependencies() {
+    echo -e "\n${BLUE}Установка зависимостей...${NC}"
+    
+    # Check if jq is installed
+    if ! command -v jq &> /dev/null; then
+        echo -e "${YELLOW}Установка jq...${NC}"
+        apt-get update && apt-get install -y jq
+    fi
+    
     # Установка системных зависимостей
     run_with_spinner "Установка системных зависимостей" "sudo apt-get install qrencode jq net-tools iptables resolvconf git bc python3-venv -y -qq"
 
