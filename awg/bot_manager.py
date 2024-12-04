@@ -27,6 +27,8 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from .payments import PaymentManager, KeyManager
 from .config.yookassa import YOOKASSA_CONFIG, SUBSCRIPTION_PRICES, SUBSCRIPTION_DAYS
+from .db import (get_config, register_user, get_user, load_payments, 
+                save_payment, update_payment_status, get_user_traffic_limit)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1023,7 +1025,7 @@ async def update_all_clients_traffic():
         traffic_data = await update_traffic(username, incoming_bytes, outgoing_bytes)
         logger.info(f"Обновлён трафик для пользователя {username}: Входящий {traffic_data['total_incoming']} B, Исходящий {traffic_data['total_outgoing']} B")
         traffic_limit = db.get_user_traffic_limit(username)
-        if traffic_limit != "Неограниченно":
+        if traffic_limit:
             limit_bytes = parse_traffic_limit(traffic_limit)
             total_bytes = traffic_data.get('total_incoming', 0) + traffic_data.get('total_outgoing', 0)
             if total_bytes >= limit_bytes:
