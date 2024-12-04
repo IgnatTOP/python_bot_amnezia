@@ -469,11 +469,12 @@ install_bot() {
         echo -e "${RED}Ошибка при проверке Python. Установка прервана.${NC}"
         exit 1
     fi
-    echo -e "${GREEN}Начинаем установку зависимостей...${NC}"
-    install_dependencies
     install_and_configure_needrestart
     clone_repository
+    echo -e "${GREEN}Начинаем установку зависимостей...${NC}"
+    install_dependencies
     setup_venv
+    configure_yookassa
     initialize_bot
     create_service
 }
