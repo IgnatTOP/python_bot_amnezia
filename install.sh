@@ -195,7 +195,12 @@ check_python() {
 
     # Проверяем версию Python
     PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-    if (( $(echo "$PYTHON_VERSION < 3.7" | bc -l) )); then
+    
+    # Преобразуем версию в числовой формат для сравнения (например, 3.7 -> 3.07)
+    VERSION_NORMALIZED=$(echo "$PYTHON_VERSION" | awk -F. '{ printf("%d.%02d\n", $1, $2) }')
+    MIN_VERSION="3.07"  # Минимальная версия 3.7
+    
+    if (( $(echo "$VERSION_NORMALIZED < $MIN_VERSION" | bc -l) )); then
         echo -e "${RED}Требуется Python версии 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
         return 1
     fi
@@ -422,6 +427,7 @@ install_bot() {
         echo -e "${RED}Ошибка при проверке Python. Установка прервана.${NC}"
         exit 1
     fi
+    echo -e "${GREEN}Начинаем установку зависимостей...${NC}"
     install_dependencies
     install_and_configure_needrestart
     clone_repository
