@@ -7,8 +7,6 @@ import socket
 import logging
 import tempfile
 from datetime import datetime
-import random
-import string
 
 EXPIRATIONS_FILE = 'files/expirations.json'
 UTC = pytz.UTC
@@ -36,9 +34,6 @@ def create_config(path='files/setting.ini'):
 
     bot_token = input('Введите токен Telegram бота: ').strip()
     admin_id = input('Введите Telegram ID администратора: ').strip()
-    yoomoney_token = input('Введите токен YooMoney API: ').strip()
-    yoomoney_shop_id = input('Введите идентификатор магазина YooMoney: ').strip()
-    yoomoney_secret_key = yoomoney_token  # Use the same token for secret key
 
     docker_container = get_amnezia_container()
     logger.info(f"Найден Docker-контейнер: {docker_container}")
@@ -60,14 +55,16 @@ def create_config(path='files/setting.ini'):
         logger.error("Ошибка при определении внешнего IP-адреса сервера.")
         endpoint = input('Не удалось автоматически определить внешний IP-адрес. Пожалуйста, введите его вручную: ').strip()
 
+    yookassa_shop_id = input('Введите YooKassa Shop ID: ').strip()
+    yookassa_secret_key = input('Введите YooKassa Secret Key: ').strip()
+
     config.set("setting", "bot_token", bot_token)
     config.set("setting", "admin_id", admin_id)
-    config.set("setting", "yoomoney_token", yoomoney_token)
-    config.set("setting", "yoomoney_shop_id", yoomoney_shop_id)
-    config.set("setting", "yoomoney_secret_key", yoomoney_secret_key)
     config.set("setting", "docker_container", docker_container)
     config.set("setting", "wg_config_file", wg_config_file)
     config.set("setting", "endpoint", endpoint)
+    config.set("setting", "yookassa_shop_id", yookassa_shop_id)
+    config.set("setting", "yookassa_secret_key", yookassa_secret_key)
 
     with open(path, "w") as config_file:
         config.write(config_file)
@@ -149,16 +146,19 @@ def ensure_peer_names():
         logger.error(f"Ошибка при обновлении комментариев в конфигурации WireGuard: {e}")
 
 def get_config(path='files/setting.ini'):
-    if not os.path.exists(path):
-        create_config(path)
-
     config = configparser.ConfigParser()
-    config.read(path)
-    out = {}
-    for key in config['setting']:
-        out[key] = config['setting'][key]
-
-    return out
+    if os.path.exists(path):
+        config.read(path)
+        return {
+            'bot_token': config.get('setting', 'bot_token', fallback=None),
+            'admin_id': config.get('setting', 'admin_id', fallback=None),
+            'docker_container': config.get('setting', 'docker_container', fallback=None),
+            'wg_config_file': config.get('setting', 'wg_config_file', fallback=None),
+            'endpoint': config.get('setting', 'endpoint', fallback=None),
+            'yookassa_shop_id': config.get('setting', 'yookassa_shop_id', fallback=None),
+            'yookassa_secret_key': config.get('setting', 'yookassa_secret_key', fallback=None)
+        }
+    return {}
 
 def save_client_endpoint(username, endpoint):
     os.makedirs('files/connections', exist_ok=True)
@@ -391,42 +391,20 @@ def get_user_traffic_limit(username: str):
     expirations = load_expirations()
     return expirations.get(username, {}).get('traffic_limit', "Неограниченно")
 
-# Add new functions for license management
-def save_license(username: str, license_key: str, expiration_date: datetime, plan: str):
-    expirations = load_expirations()
-    expirations[username] = {
-        'expiration': expiration_date.isoformat(),
-        'license_key': license_key,
-        'plan': plan,
-        'traffic_limit': '100 GB'  # Default traffic limit
-    }
-    save_expirations(expirations)
+def get_user_key(user_id: str):
+    """Get user's VPN key if exists"""
+    username = f"user_{user_id}"
+    clients = get_clients_from_clients_table()
+    return next((client for client in clients if client['username'] == username), None)
 
-def get_user_license(username: str):
-    expirations = load_expirations()
-    if username in expirations:
-        data = expirations[username]
-        return {
-            'license_key': data.get('license_key'),
-            'expiration': datetime.fromisoformat(data['expiration']),
-            'plan': data.get('plan'),
-            'traffic_limit': data.get('traffic_limit', '100 GB')
-        }
-    return None
+def regenerate_user_key(user_id: str):
+    """Regenerate user's VPN key"""
+    username = f"user_{user_id}"
+    deactive_user_db(username)
+    return True
 
-def regenerate_license_key(username: str):
-    expirations = load_expirations()
-    if username in expirations:
-        new_key = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
-        expirations[username]['license_key'] = new_key
-        save_expirations(expirations)
-        return new_key
-    return None
-
-def delete_license(username: str):
-    expirations = load_expirations()
-    if username in expirations:
-        del expirations[username]
-        save_expirations(expirations)
-        return True
-    return False
+def delete_user_key(user_id: str):
+    """Delete user's VPN key"""
+    username = f"user_{user_id}"
+    deactive_user_db(username)
+    return True

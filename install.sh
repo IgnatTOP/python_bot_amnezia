@@ -209,7 +209,8 @@ check_python() {
 }
 
 install_dependencies() {
-    run_with_spinner "Установка зависимостей" "sudo apt-get install qrencode jq net-tools iptables resolvconf git -y -qq"
+    run_with_spinner "Установка зависимостей" "sudo apt-get install -y python3-pip python3-venv git"
+    run_with_spinner "Установка дополнительных зависимостей" "sudo apt-get install -y python3-dev build-essential"
 }
 
 install_and_configure_needrestart() {
@@ -218,43 +219,23 @@ install_and_configure_needrestart() {
     grep -q 'nrconf{restart} = "a";' /etc/needrestart/needrestart.conf || echo 'nrconf{restart} = "a";' | sudo tee /etc/needrestart/needrestart.conf >/dev/null 2>&1
 }
 
-create_config() {
-    mkdir -p users
-    mkdir -p files
-    mkdir -p configs
-
-    cat > configs/settings.json << EOL
-{
-    "bot_token": "7782664718:AAFkre94HlYW_RCDqA2YBUc8guo2B5-EpSM",
-    "admin_ids": [487523019],
-    "yookassa": {
-        "shop_id": "993270",
-        "secret_key": "test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE"
-    },
-    "docker_container": "amnezia-node",
-    "endpoint": "http://localhost:8080"
-}
-EOL
-}
-
 clone_repository() {
-    if [[ -d "python_bot_amnezia" ]]; then
+    if [[ -d "awg-docker-bot" ]]; then
         echo -e "\n${YELLOW}Репозиторий существует${NC}"
-        cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+        cd awg-docker-bot || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
         return 0
     fi
     
-    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git >/dev/null 2>&1"
-    cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+    run_with_spinner "Клонирование репозитория" "git clone https://github.com/JB-SelfCompany/awg-docker-bot.git >/dev/null 2>&1"
+    cd awg-docker-bot || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
 }
 
 setup_venv() {
-    if [[ -d "myenv" ]]; then
-        echo -e "\n${YELLOW}Виртуальное окружение существует${NC}"
-        return 0
-    fi
-    
-    run_with_spinner "Настройка виртуального окружения" "python3.11 -m venv myenv && source myenv/bin/activate && pip install --upgrade pip && pip install -r $(pwd)/requirements.txt && deactivate"
+    run_with_spinner "Создание виртуального окружения" "python3 -m venv $SCRIPT_DIR/venv"
+    run_with_spinner "Активация виртуального окружения" "source $SCRIPT_DIR/venv/bin/activate"
+    run_with_spinner "Обновление pip" "pip install --upgrade pip"
+    run_with_spinner "Установка зависимостей" "pip install -r $SCRIPT_DIR/requirements.txt"
+    run_with_spinner "Установка YooKassa" "pip install yookassa"
 }
 
 set_permissions() {
@@ -265,39 +246,47 @@ set_permissions() {
 }
 
 initialize_bot() {
-    cd awg || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+    if [ ! -f "$SCRIPT_DIR/files/setting.ini" ]; then
+        echo -e "\n${YELLOW}Настройка бота${NC}"
+        
+        read -p "Введите токен Telegram бота: " bot_token
+        read -p "Введите Telegram ID администратора: " admin_id
+        read -p "Введите Shop ID YooKassa: " yookassa_shop_id
+        read -p "Введите Secret Key YooKassa: " yookassa_secret_key
+        
+        docker_container=$(get_amnezia_container)
+        
+        cmd="docker exec $docker_container find / -name wg0.conf"
+        wg_config_file=$(eval "$cmd" 2>/dev/null || echo "/opt/amnezia/awg/wg0.conf")
+        
+        endpoint=$(curl -s https://api.ipify.org || read -p "Введите внешний IP-адрес сервера: ")
+        
+        mkdir -p "$SCRIPT_DIR/files"
+        
+        cat > "$SCRIPT_DIR/files/setting.ini" << EOL
+[setting]
+bot_token = $bot_token
+admin_id = $admin_id
+docker_container = $docker_container
+wg_config_file = $wg_config_file
+endpoint = $endpoint
+yookassa_shop_id = $yookassa_shop_id
+yookassa_secret_key = $yookassa_secret_key
+EOL
+        
+        echo -e "${GREEN}Файл конфигурации создан${NC}"
+    else
+        echo -e "${YELLOW}Файл конфигурации уже существует${NC}"
+    fi
     
-    echo -e "\n${BLUE}Инициализация бота...${NC}"
-    echo -e "${YELLOW}Пожалуйста, введите следующую информацию:${NC}"
+    # Create required directories
+    mkdir -p "$SCRIPT_DIR/files/connections"
+    mkdir -p "$SCRIPT_DIR/files/traffic"
+    mkdir -p "$SCRIPT_DIR/files/payments"
     
-    # Запускаем бота с перенаправлением ввода/вывода
-    ../myenv/bin/python3.11 bot_manager.py < /dev/tty &
-    local BOT_PID=$!
-    
-    # Ожидаем создания файла конфигурации
-    local TIMEOUT=60
-    local COUNTER=0
-    while [ ! -f "files/setting.ini" ]; do
-        sleep 2
-        ((COUNTER+=2))
-        if [ $COUNTER -ge $TIMEOUT ]; then
-            echo -e "\n${RED}Превышено время ожидания инициализации${NC}"
-            kill "$BOT_PID" 2>/dev/null
-            wait "$BOT_PID" 2>/dev/null
-            exit 1
-        fi
-        kill -0 "$BOT_PID" 2>/dev/null || { 
-            echo -e "\n${RED}Бот завершил работу до инициализации${NC}"
-            exit 1
-        }
-    done
-    
-    # Корректно завершаем процесс бота
-    kill "$BOT_PID"
-    wait "$BOT_PID" 2>/dev/null
-    
-    echo -e "\n${GREEN}Инициализация завершена успешно${NC}"
-    cd ..
+    # Set proper permissions
+    chown -R $SUDO_USER:$SUDO_USER "$SCRIPT_DIR/files"
+    chmod -R 755 "$SCRIPT_DIR/files"
 }
 
 create_service() {
@@ -309,7 +298,7 @@ After=network.target
 [Service]
 User=$USER
 WorkingDirectory=$(pwd)/awg
-ExecStart=$(pwd)/myenv/bin/python3.11 bot_manager.py
+ExecStart=$(pwd)/venv/bin/python3.11 bot_manager.py
 Restart=always
 
 [Install]
@@ -330,7 +319,6 @@ install_bot() {
     check_python
     install_dependencies
     install_and_configure_needrestart
-    create_config
     clone_repository
     setup_venv
     set_permissions
@@ -338,123 +326,8 @@ install_bot() {
     create_service
 }
 
-install_bot_new() {
-    ENDPOINT=$(jq -r '.endpoint' configs/settings.json)
-    DOCKER_CONTAINER=$(jq -r '.docker_container' configs/settings.json)
-    WG_CONFIG="/etc/wireguard/wg0.conf"
-
-    mkdir -p users
-    mkdir -p files
-
-    run_with_spinner "Установка зависимостей" "sudo apt-get update && sudo apt-get install -y python3 python3-pip wireguard qrencode jq"
-    run_with_spinner "Установка Python зависимостей" "pip3 install -r requirements.txt"
-    run_with_spinner "Копирование конфигурации" "cp configs/settings.json.example configs/settings.json"
-    run_with_spinner "Установка прав доступа" "chmod +x add-client.sh && chmod +x awg-decode.py"
-
-    cat > /etc/systemd/system/awg-bot.service << EOL
-[Unit]
-Description=AWG Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/home/ignat/awg-docker-bot
-ExecStart=/usr/bin/python3 awg/bot_manager.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-    run_with_spinner "Перезагрузка systemd и включение сервиса" "sudo systemctl daemon-reload && sudo systemctl enable awg-bot && sudo systemctl start awg-bot"
-
-    echo "Установка завершена. Бот запущен и добавлен в автозагрузку."
-}
-
 main() {
-    systemctl list-units --type=service --all | grep -q "$SERVICE_NAME.service" && installed_menu || { 
-        echo "Установка системных зависимостей..."
-        apt-get update
-        apt-get install -y python3 python3-pip wireguard qrencode jq git
-        print_status "Установка системных зависимостей"
-
-        echo "Клонирование репозитория..."
-        cd /home/ignat
-        if [ -d "awg-docker-bot" ]; then
-            cd awg-docker-bot
-            git pull
-        else
-            git clone https://github.com/your-repo/awg-docker-bot.git
-            cd awg-docker-bot
-        fi
-        print_status "Клонирование репозитория"
-
-        echo "Создание директорий..."
-        mkdir -p users files configs
-        print_status "Создание директорий"
-
-        echo "Создание конфигурации..."
-        cat > configs/settings.json << EOL
-{
-    "bot_token": "7782664718:AAFkre94HlYW_RCDqA2YBUc8guo2B5-EpSM",
-    "admin_ids": [487523019],
-    "yookassa": {
-        "shop_id": "993270",
-        "secret_key": "test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE"
-    },
-    "docker_container": "amnezia-node",
-    "endpoint": "http://localhost:8080"
-}
-EOL
-        print_status "Создание конфигурации"
-
-        echo "Установка Python зависимостей..."
-        if [ -f "requirements.txt" ]; then
-            pip3 install -r requirements.txt
-            print_status "Установка Python зависимостей"
-        else
-            echo -e "${RED}[ERROR]${NC} requirements.txt не найден"
-            exit 1
-        fi
-
-        echo "Настройка прав доступа..."
-        if [ -f "add-client.sh" ]; then
-            chmod +x add-client.sh
-        fi
-        if [ -f "awg-decode.py" ]; then
-            chmod +x awg-decode.py
-        fi
-        print_status "Настройка прав доступа"
-
-        echo "Создание systemd сервиса..."
-        cat > /etc/systemd/system/awg-bot.service << EOL
-[Unit]
-Description=AWG Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/home/ignat/awg-docker-bot
-ExecStart=/usr/bin/python3 awg/bot_manager.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOL
-        print_status "Создание systemd сервиса"
-
-        echo "Настройка и запуск сервиса..."
-        systemctl daemon-reload
-        systemctl enable awg-bot
-        systemctl start awg-bot
-        print_status "Настройка и запуск сервиса"
-
-        echo -e "${GREEN}Установка успешно завершена!${NC}"
-        echo "Бот запущен и добавлен в автозагрузку."
-        ( sleep 1; rm -- "$SCRIPT_PATH" ) & exit 0; 
-    }
+    systemctl list-units --type=service --all | grep -q "$SERVICE_NAME.service" && installed_menu || { install_bot; ( sleep 1; rm -- "$SCRIPT_PATH" ) & exit 0; }
 }
 
 main

@@ -1,4 +1,5 @@
 import db
+import payment
 import aiohttp
 import logging
 import asyncio
@@ -23,14 +24,6 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from payment import PaymentManager, LICENSE_PRICES
-import random
-import string
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.contrib.fsm_storage.redis import RedisStorage2
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from typing import Optional, List, Dict, Any, Union
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,11 +34,8 @@ admin_id = setting.get('admin_id')
 wg_config_file = setting.get('wg_config_file')
 docker_container = setting.get('docker_container')
 endpoint = setting.get('endpoint')
-yoomoney_token = setting.get('yoomoney_token')
-yoomoney_shop_id = setting.get('yoomoney_shop_id')
-yoomoney_secret_key = setting.get('yoomoney_secret_key')
 
-if not all([bot_token, admin_id, wg_config_file, docker_container, endpoint, yoomoney_token, yoomoney_shop_id, yoomoney_secret_key]):
+if not all([bot_token, admin_id, wg_config_file, docker_container, endpoint]):
     logger.error("Некоторые обязательные настройки отсутствуют в конфигурационном файле.")
     sys.exit(1)
 
@@ -55,21 +45,52 @@ WG_CONFIG_FILE = wg_config_file
 DOCKER_CONTAINER = docker_container
 ENDPOINT = endpoint
 
-# Initialize payment manager with all required parameters
-payment_manager = PaymentManager(
-    token=setting.get('yoomoney_token'),
-    shop_id=setting.get('yoomoney_shop_id'),
-    secret_key=setting.get('yoomoney_secret_key')
+dp = Dispatcher(bot)
+scheduler = AsyncIOScheduler(timezone=pytz.UTC)
+scheduler.start()
+
+# Define prices
+PRICES = {
+    "1_month": 300,  # 300 RUB for 1 month
+    "3_months": 800,  # 800 RUB for 3 months
+    "6_months": 1500,  # 1500 RUB for 6 months
+    "12_months": 2800,  # 2800 RUB for 12 months
+}
+
+# User menu markup
+user_menu_markup = InlineKeyboardMarkup(row_width=1).add(
+    InlineKeyboardButton("Купить VPN", callback_data="buy_vpn"),
+    InlineKeyboardButton("Мой VPN ключ", callback_data="my_key"),
+    InlineKeyboardButton("Обновить ключ", callback_data="regenerate_key"),
+    InlineKeyboardButton("Удалить ключ", callback_data="delete_key")
 )
+
+# Admin menu markup
+admin_menu_markup = InlineKeyboardMarkup(row_width=1).add(
+    InlineKeyboardButton("Добавить пользователя", callback_data="add_user"),
+    InlineKeyboardButton("Получить конфигурацию пользователя", callback_data="get_config"),
+    InlineKeyboardButton("Список клиентов", callback_data="list_users"),
+    InlineKeyboardButton("История платежей", callback_data="payment_history"),
+    InlineKeyboardButton("Отправить сообщение всем", callback_data="mass_message"),
+    InlineKeyboardButton("Создать бекап", callback_data="create_backup")
+)
+
+# Payment menu markup
+def get_payment_markup():
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("1 месяц - 300₽", callback_data="pay_1_month"),
+        InlineKeyboardButton("3 месяца - 800₽", callback_data="pay_3_months"),
+        InlineKeyboardButton("6 месяцев - 1500₽", callback_data="pay_6_months"),
+        InlineKeyboardButton("12 месяцев - 2800₽", callback_data="pay_12_months"),
+        InlineKeyboardButton("« Назад", callback_data="return_home")
+    )
+    return markup
 
 class AdminMessageDeletionMiddleware(BaseMiddleware):
     async def on_process_message(self, message: types.Message, data: dict):
         if message.from_user.id == admin:
             asyncio.create_task(delete_message_after_delay(message.chat.id, message.message_id, delay=2))
-
-dp = Dispatcher(bot)
-scheduler = AsyncIOScheduler(timezone=pytz.UTC)
-scheduler.start()
 
 dp.middleware.setup(AdminMessageDeletionMiddleware())
 
@@ -77,16 +98,7 @@ main_menu_markup = InlineKeyboardMarkup(row_width=1).add(
     InlineKeyboardButton("Добавить пользователя", callback_data="add_user"),
     InlineKeyboardButton("Получить конфигурацию пользователя", callback_data="get_config"),
     InlineKeyboardButton("Список клиентов", callback_data="list_users"),
-    InlineKeyboardButton("Payment History", callback_data="payment_history"),
-    InlineKeyboardButton("Создать бекап", callback_data="create_backup"),
-    InlineKeyboardButton("Отправить сообщение всем", callback_data="broadcast_message")
-)
-
-user_menu_markup = InlineKeyboardMarkup(row_width=1).add(
-    InlineKeyboardButton("Buy License", callback_data="buy_license"),
-    InlineKeyboardButton("My License Info", callback_data="license_info"),
-    InlineKeyboardButton("Regenerate Key", callback_data="regenerate_key"),
-    InlineKeyboardButton("Delete License", callback_data="delete_license")
+    InlineKeyboardButton("Создать бекап", callback_data="create_backup")
 )
 
 user_main_messages = {}
@@ -96,8 +108,8 @@ CACHE_TTL = timedelta(hours=24)
 
 TRAFFIC_LIMITS = ["5 GB", "10 GB", "30 GB", "100 GB", "Неограниченно"]
 
-class BroadcastStates(StatesGroup):
-    waiting_for_message = State()
+def get_interface_name():
+    return os.path.basename(WG_CONFIG_FILE).split('.')[0]
 
 async def load_isp_cache():
     global isp_cache
@@ -217,42 +229,62 @@ def parse_relative_time(relative_str: str) -> datetime:
 @dp.message_handler(commands=['start', 'help'])
 async def help_command_handler(message: types.Message):
     if message.chat.id == admin:
-        sent_message = await message.answer("Выберите действие:", reply_markup=main_menu_markup)
-        user_main_messages[admin] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
-        try:
-            await bot.pin_chat_message(chat_id=message.chat.id, message_id=sent_message.message_id, disable_notification=True)
-        except:
-            pass
+        sent_message = await message.answer("Выберите действие:", reply_markup=admin_menu_markup)
     else:
-        sent_message = await message.answer(
-            "Добро пожаловать! Для использования VPN сервиса необходимо приобрести лицензию.",
-            reply_markup=user_menu_markup
+        sent_message = await message.answer("Добро пожаловать! Выберите действие:", reply_markup=user_menu_markup)
+    
+    user_main_messages[message.chat.id] = {
+        'chat_id': sent_message.chat.id,
+        'message_id': sent_message.message_id
+    }
+    
+    try:
+        await bot.pin_chat_message(
+            chat_id=message.chat.id,
+            message_id=sent_message.message_id,
+            disable_notification=True
         )
+    except:
+        pass
 
 @dp.message_handler()
 async def handle_messages(message: types.Message):
-    if message.chat.id == admin:
-        user_state = user_main_messages.get(admin, {}).get('state')
-        if user_state == 'waiting_for_user_name':
-            user_name = message.text.strip()
-            if not all(c.isalnum() or c in "-_" for c in user_name):
-                await message.reply("Имя пользователя может содержать только буквы, цифры, дефисы и подчёркивания.")
-                return
-            user_main_messages[admin]['client_name'] = user_name
-            user_main_messages[admin]['state'] = 'waiting_for_duration'
-            duration_buttons = [
-                InlineKeyboardButton("1 час", callback_data=f"duration_1h_{user_name}_noipv6"),
-                InlineKeyboardButton("1 день", callback_data=f"duration_1d_{user_name}_noipv6"),
-                InlineKeyboardButton("1 неделя", callback_data=f"duration_1w_{user_name}_noipv6"),
-                InlineKeyboardButton("1 месяц", callback_data=f"duration_1m_{user_name}_noipv6"),
-                InlineKeyboardButton("Без ограничений", callback_data=f"duration_unlimited_{user_name}_noipv6"),
-                InlineKeyboardButton("Домой", callback_data="home")
-            ]
-            duration_markup = InlineKeyboardMarkup(row_width=1).add(*duration_buttons)
-            await message.answer("Выберите длительность:", reply_markup=duration_markup)
+    if message.chat.id != admin:
+        await message.answer("У вас нет доступа к этому боту.")
+        return
+    user_state = user_main_messages.get(admin, {}).get('state')
+    if user_state == 'waiting_for_user_name':
+        user_name = message.text.strip()
+        if not all(c.isalnum() or c in "-_" for c in user_name):
+            await message.reply("Имя пользователя может содержать только буквы, цифры, дефисы и подчёркивания.")
+            asyncio.create_task(delete_message_after_delay(sent_message.chat.id, sent_message.message_id, delay=2))
+            return
+        user_main_messages[admin]['client_name'] = user_name
+        user_main_messages[admin]['state'] = 'waiting_for_duration'
+        duration_buttons = [
+            InlineKeyboardButton("1 час", callback_data=f"duration_1h_{user_name}_noipv6"),
+            InlineKeyboardButton("1 день", callback_data=f"duration_1d_{user_name}_noipv6"),
+            InlineKeyboardButton("1 неделя", callback_data=f"duration_1w_{user_name}_noipv6"),
+            InlineKeyboardButton("1 месяц", callback_data=f"duration_1m_{user_name}_noipv6"),
+            InlineKeyboardButton("Без ограничений", callback_data=f"duration_unlimited_{user_name}_noipv6"),
+            InlineKeyboardButton("Домой", callback_data="home")
+        ]
+        duration_markup = InlineKeyboardMarkup(row_width=1).add(*duration_buttons)
+        main_chat_id = user_main_messages[admin].get('chat_id')
+        main_message_id = user_main_messages[admin].get('message_id')
+        if main_chat_id and main_message_id:
+            await bot.edit_message_text(
+                chat_id=main_chat_id,
+                message_id=main_message_id,
+                text=f"Выберите время действия конфигурации для пользователя **{user_name}**:",
+                parse_mode="Markdown",
+                reply_markup=duration_markup
+            )
+        else:
+            await message.answer("Ошибка: главное сообщение не найдено.")
     else:
-        # Handle regular user messages if needed
-        pass
+        await message.reply("Неизвестная команда или действие.")
+        asyncio.create_task(delete_message_after_delay(sent_message.chat.id, sent_message.message_id, delay=2))
 
 @dp.callback_query_handler(lambda c: c.data.startswith('add_user'))
 async def prompt_for_user_name(callback_query: types.CallbackQuery):
@@ -598,12 +630,16 @@ async def list_users_callback(callback_query: types.CallbackQuery):
     main_chat_id = user_main_messages.get(admin, {}).get('chat_id')
     main_message_id = user_main_messages.get(admin, {}).get('message_id')
     if main_chat_id and main_message_id:
-        await bot.edit_message_text(
-            chat_id=main_chat_id,
-            message_id=main_message_id,
-            text="Выберите пользователя:",
-            reply_markup=keyboard
-        )
+        try:
+            await bot.edit_message_text(
+                chat_id=main_chat_id,
+                message_id=main_message_id,
+                text="Выберите пользователя:",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
+            await callback_query.answer("Ошибка при обновлении сообщения.", show_alert=True)
     else:
         sent_message = await callback_query.message.reply("Выберите пользователя:", reply_markup=keyboard)
         user_main_messages[admin] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
@@ -740,27 +776,6 @@ async def client_delete_callback(callback_query: types.CallbackQuery):
         return
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data == "return_home")
-async def return_home(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    is_admin = user_id == admin
-    
-    try:
-        if is_admin:
-            await callback_query.message.edit_text(
-                "Выберите действие:",
-                reply_markup=main_menu_markup
-            )
-        else:
-            await callback_query.message.edit_text(
-                "Выберите действие:",
-                reply_markup=user_menu_markup
-            )
-        await callback_query.answer()
-    except Exception as e:
-        logger.error(f"Error in return_home: {e}")
-        await callback_query.answer("Произошла ошибка при возврате в главное меню", show_alert=True)
-
 @dp.callback_query_handler(lambda c: c.data.startswith('home'))
 async def return_home(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
@@ -796,7 +811,7 @@ async def return_home(callback_query: types.CallbackQuery):
             pass
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data == 'get_config')
+@dp.callback_query_handler(lambda c: c.data.startswith('get_config'))
 async def list_users_for_config(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
@@ -1034,294 +1049,29 @@ async def update_all_clients_traffic():
                 await deactivate_user(username)
     logger.info("Завершено обновление трафика для всех клиентов.")
 
-async def generate_vpn_key(username: str) -> Optional[str]:
-    """Generate VPN configuration for a user"""
+async def generate_vpn_key(conf_path: str) -> str:
     try:
-        # Create VPN configuration using existing scripts
-        endpoint = settings.get('endpoint', 'http://localhost:8080')
-        wg_config = '/etc/wireguard/wg0.conf'
-        docker_container = settings.get('docker_container', 'amnezia-node')
-        
-        process = await asyncio.create_subprocess_shell(
-            f'./add-client.sh "{username}" "{endpoint}" "{wg_config}" "{docker_container}"',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd="/home/ignat/awg-docker-bot"
-        )
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            logger.error(f"Error in add-client.sh: {stderr.decode()}")
-            return None
-            
-        # Check if configuration file exists
-        conf_path = os.path.join('users', username, f'{username}.conf')
-        if not os.path.exists(conf_path):
-            logger.error(f"Config file not found: {conf_path}")
-            return None
-            
-        # Generate VPN key from configuration
         process = await asyncio.create_subprocess_exec(
-            'python3',
+            'python3.11',
             'awg-decode.py',
             '--encode',
             conf_path,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd="/home/ignat/awg-docker-bot"
+            stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
-        
         if process.returncode != 0:
-            logger.error(f"Error in awg-decode.py: {stderr.decode()}")
-            return None
-            
+            logger.error(f"awg-decode.py ошибка: {stderr.decode().strip()}")
+            return ""
         vpn_key = stdout.decode().strip()
-        if not vpn_key.startswith('vpn://'):
-            logger.error(f"Invalid VPN key format: {vpn_key}")
-            return None
-            
-        return vpn_key
-        
-    except Exception as e:
-        logger.error(f"Error in generate_vpn_key: {e}")
-        return None
-
-@dp.callback_query_handler(lambda c: c.data == "add_user")
-async def add_user_callback(callback_query: types.CallbackQuery):
-    """Handle adding a new user"""
-    if callback_query.from_user.id not in ADMIN_IDS:
-        await callback_query.answer("У вас нет прав администратора", show_alert=True)
-        return
-        
-    try:
-        # Generate username
-        username = f"user_{uuid.uuid4().hex[:8]}"
-        
-        # Generate VPN key
-        vpn_key = await generate_vpn_key(username)
-        if not vpn_key:
-            raise Exception("Failed to generate VPN key")
-            
-        # Set default expiration (30 days)
-        expiration_date = datetime.now() + timedelta(days=30)
-        db.set_user_expiration(username, expiration_date, "Неограниченно")
-        
-        # Send config to admin
-        conf_path = os.path.join('users', username, f'{username}.conf')
-        if os.path.exists(conf_path):
-            instruction_text = (
-                "AmneziaVPN [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn&hl=ru), "
-                "[GitHub](https://github.com/amnezia-vpn/amnezia-client)"
-            )
-            formatted_key = format_vpn_key(vpn_key)
-            key_message = f"```\n{formatted_key}\n```"
-            
-            with open(conf_path, 'rb') as config_file:
-                await bot.send_document(
-                    callback_query.message.chat.id,
-                    config_file,
-                    caption=f"{instruction_text}\n{key_message}",
-                    parse_mode="Markdown"
-                )
-        
-        await callback_query.message.edit_text(
-            f"✅ Пользователь успешно создан\n\n"
-            f"🆔 ID: {username}\n"
-            f"📅 Срок действия: {expiration_date.strftime('%d.%m.%Y')}\n"
-            "📊 Трафик: Неограниченно\n\n"
-            "⚙️ Конфигурация отправлена выше",
-            reply_markup=get_admin_keyboard()
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in add_user_callback: {e}")
-        await callback_query.message.edit_text(
-            f"❌ Ошибка при создании пользователя: {str(e)}",
-            reply_markup=get_admin_keyboard()
-        )
-
-@dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
-async def check_payment_callback(callback_query: types.CallbackQuery):
-    payment_id = callback_query.data.replace('check_payment_', '')
-    user_id = str(callback_query.from_user.id)
-    
-    try:
-        is_paid = payment_manager.check_payment(payment_id)
-        if is_paid:
-            payment_data = payment_manager.payments.get(payment_id)
-            if not payment_data:
-                raise Exception("Payment data not found")
-                
-            plan = payment_data.get('plan')
-            if not plan:
-                raise Exception("Plan not found in payment data")
-            
-            # Calculate expiration date based on plan
-            duration_map = {
-                "1_month": 30,
-                "3_months": 90,
-                "6_months": 180,
-                "12_months": 365
-            }
-            
-            days = duration_map.get(plan)
-            if not days:
-                raise Exception(f"Invalid plan: {plan}")
-                
-            expiration_date = datetime.now() + timedelta(days=days)
-            
-            # Generate VPN key
-            vpn_key = await generate_vpn_key(user_id)
-            if not vpn_key:
-                raise Exception("Failed to generate VPN key")
-            
-            # Save license information
-            db.set_user_expiration(user_id, expiration_date, "Неограниченно")
-            
-            # Send configuration to user
-            conf_path = os.path.join('users', user_id, f'{user_id}.conf')
-            if os.path.exists(conf_path):
-                instruction_text = (
-                    "AmneziaVPN [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn&hl=ru), "
-                    "[GitHub](https://github.com/amnezia-vpn/amnezia-client)"
-                )
-                formatted_key = format_vpn_key(vpn_key)
-                key_message = f"```\n{formatted_key}\n```"
-                
-                with open(conf_path, 'rb') as config_file:
-                    await bot.send_document(
-                        callback_query.message.chat.id,
-                        config_file,
-                        caption=f"{instruction_text}\n{key_message}",
-                        parse_mode="Markdown"
-                    )
-            
-            success_text = (
-                "✅ Оплата успешно произведена!\n\n"
-                f"📅 Срок действия: {expiration_date.strftime('%d.%m.%Y')}\n"
-                "📊 Трафик: Неограниченно\n\n"
-                "⚙️ Конфигурация отправлена выше.\n"
-                "📱 Установите приложение AmneziaVPN:\n"
-                "• [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn)\n"
-                "• [GitHub](https://github.com/amnezia-vpn/amnezia-client)"
-            )
-            
-            markup = InlineKeyboardMarkup().add(
-                InlineKeyboardButton("« Главное меню", callback_data="return_home")
-            )
-            
-            await callback_query.message.edit_text(success_text, reply_markup=markup, parse_mode="Markdown")
-            logger.info(f"Successfully processed payment {payment_id} for user {user_id}")
-            
+        if vpn_key.startswith('vpn://'):
+            return vpn_key
         else:
-            payment_status = payment_manager.get_payment_status(payment_id)
-            if payment_status in ["canceled", "expired"]:
-                status_text = "❌ Платёж был отменен или истек срок ожидания."
-            else:
-                status_text = "⏳ Платёж еще не подтвержден. Пожалуйста, подождите или попробуйте снова."
-            
-            markup = InlineKeyboardMarkup().add(
-                InlineKeyboardButton("🔄 Проверить снова", callback_data=f"check_payment_{payment_id}"),
-                InlineKeyboardButton("« Отмена", callback_data="return_home")
-            )
-            
-            await callback_query.message.edit_text(
-                f"{status_text}\n\nID платежа: {payment_id}",
-                reply_markup=markup
-            )
-            
+            logger.error(f"awg-decode.py вернул некорректный формат: {vpn_key}")
+            return ""
     except Exception as e:
-        error_msg = f"Ошибка при проверке платежа: {str(e)}"
-        logger.error(f"Payment check error for user {user_id}, payment {payment_id}: {str(e)}")
-        await callback_query.answer(error_msg, show_alert=True)
-        
-        markup = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("« Главное меню", callback_data="return_home")
-        )
-        await callback_query.message.edit_text(
-            f"❌ {error_msg}\n\nОбратитесь к администратору.",
-            reply_markup=markup
-        )
-    
-    await callback_query.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "payment_history")
-async def payment_history_callback(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("Access denied")
-        return
-        
-    payments = payment_manager.get_all_payments()
-    history_text = "Payment History:\n\n"
-    
-    for payment_id, payment in payments.items():
-        history_text += (
-            f"User ID: {payment['user_id']}\n"
-            f"Plan: {payment['plan']}\n"
-            f"Amount: {payment['amount']} RUB\n"
-            f"Status: {payment['status']}\n"
-            f"Created: {payment['created_at']}\n"
-            f"Completed: {payment['completed_at'] or 'Pending'}\n"
-            f"-------------------\n"
-        )
-    
-    # Split into chunks if too long
-    if len(history_text) > 4096:
-        chunks = [history_text[i:i+4096] for i in range(0, len(history_text), 4096)]
-        for chunk in chunks:
-            await callback_query.message.answer(chunk)
-    else:
-        await callback_query.message.edit_text(
-            history_text,
-            reply_markup=main_menu_markup
-        )
-
-@dp.callback_query_handler(lambda c: c.data == "broadcast_message")
-async def broadcast_message_prompt(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен")
-        return
-    
-    state = dp.current_state(user=callback_query.from_user.id)
-    await state.set_state("waiting_for_broadcast")
-    
-    markup = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("« Отмена", callback_data="return_home")
-    )
-    
-    await callback_query.message.edit_text(
-        "Введите сообщение для рассылки всем пользователям:",
-        reply_markup=markup
-    )
-
-@dp.message_handler(state="waiting_for_broadcast")
-async def handle_broadcast_message(message: types.Message):
-    if message.from_user.id != admin:
-        return
-    
-    state = dp.current_state(user=message.from_user.id)
-    await state.reset_state()
-    
-    users = db.get_clients_from_clients_table()
-    sent_count = 0
-    failed_count = 0
-    
-    for user in users:
-        try:
-            await bot.send_message(user['clientId'], 
-                                 f"📢 Сообщение от администратора:\n\n{message.text}")
-            sent_count += 1
-        except Exception as e:
-            logger.error(f"Failed to send broadcast to user {user['clientId']}: {e}")
-            failed_count += 1
-    
-    await message.answer(
-        f"✅ Рассылка завершена\n\n"
-        f"Отправлено: {sent_count}\n"
-        f"Ошибок: {failed_count}",
-        reply_markup=main_menu_markup
-    )
+        logger.error(f"Ошибка при вызове awg-decode.py: {e}")
+        return ""
 
 async def deactivate_user(client_name: str):
     success = db.deactive_user_db(client_name)
@@ -1406,272 +1156,123 @@ async def on_shutdown(dp):
     scheduler.shutdown()
     logger.info("Планировщик остановлен.")
 
-async def handle_user_vpn_access(user_id: int, username: str):
-    """Handle VPN access for users based on their license status"""
-    license_data = db.get_user_license(username)
-    if not license_data:
-        return False, "No active license found. Please purchase a license first."
-    
-    if datetime.now(pytz.UTC) > license_data['expiration']:
-        return False, "Your license has expired. Please purchase a new license."
-    
-    return True, None
+@dp.callback_query_handler(lambda c: c.data == 'buy_vpn')
+async def buy_vpn_callback(callback_query: types.CallbackQuery):
+    await bot.edit_message_text(
+        chat_id=callback_query.message.chat.id,
+        message_id=callback_query.message.message_id,
+        text="Выберите тарифный план:",
+        reply_markup=get_payment_markup()
+    )
 
-@dp.callback_query_handler(lambda c: c.data == "buy_license")
-async def buy_license_callback(callback_query: types.CallbackQuery):
-    markup = InlineKeyboardMarkup(row_width=2)
-    for plan, price in LICENSE_PRICES.items():
-        readable_plan = plan.replace('_', ' ').title()
-        button_text = f"{readable_plan} - {price}₽"
-        markup.add(InlineKeyboardButton(button_text, callback_data=f"select_plan_{plan}"))
-    markup.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
+@dp.callback_query_handler(lambda c: c.data.startswith('pay_'))
+async def handle_payment(callback_query: types.CallbackQuery):
+    duration = callback_query.data.replace('pay_', '')
+    price = PRICES.get(duration)
+    if not price:
+        await callback_query.answer("Неверный тарифный план")
+        return
     
-    await callback_query.message.edit_text(
-        "Выберите тарифный план:\n\n"
-        "🔹 1 месяц - Базовый доступ\n"
-        "🔹 3 месяца - Скидка 20%\n"
-        "🔹 6 месяцев - Скидка 33%\n"
-        "🔹 12 месяцев - Скидка 42%\n\n"
-        "Все тарифы включают:\n"
-        "✓ Безлимитный трафик\n"
-        "✓ Высокая скорость\n"
-        "✓ Поддержка 24/7",
+    payment_info = payment.create_payment(price, callback_query.from_user.id)
+    
+    markup = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("Оплатить", url=payment_info.confirmation.confirmation_url),
+        InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{payment_info.id}")
+    )
+    
+    await bot.edit_message_text(
+        chat_id=callback_query.message.chat.id,
+        message_id=callback_query.message.message_id,
+        text=f"Для оплаты нажмите кнопку ниже. После оплаты нажмите 'Проверить оплату'.",
         reply_markup=markup
     )
 
-@dp.callback_query_handler(lambda c: c.data.startswith('select_plan_'))
-async def select_plan_callback(callback_query: types.CallbackQuery):
-    plan = callback_query.data.replace('select_plan_', '')
-    try:
-        payment_id, payment_url = payment_manager.create_payment(callback_query.from_user.id, plan)
+@dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
+async def check_payment_status(callback_query: types.CallbackQuery):
+    payment_id = callback_query.data.replace('check_payment_', '')
+    if payment.check_payment(payment_id):
+        # Generate VPN key for the user
+        username = f"user_{callback_query.from_user.id}"
+        await generate_vpn_key(username)
         
-        markup = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("💳 Оплатить", url=payment_url),
-            InlineKeyboardButton("✓ Проверить оплату", callback_data=f"check_payment_{payment_id}")
-        ).add(
-            InlineKeyboardButton("« Назад", callback_data="buy_license")
+        # Get the configuration
+        config_text = await send_user_config(callback_query, username)
+        
+        await bot.edit_message_text(
+            chat_id=callback_query.message.chat.id,
+            message_id=callback_query.message.message_id,
+            text="Оплата прошла успешно! Ваш VPN ключ готов.",
+            reply_markup=user_menu_markup
         )
         
-        await callback_query.message.edit_text(
-            "🔒 Для активации доступа к VPN выполните следующие шаги:\n\n"
-            "1. Нажмите кнопку «Оплатить»\n"
-            "2. Выполните оплату\n"
-            "3. Вернитесь в бот\n"
-            "4. Нажмите «Проверить оплату»\n\n"
-            "После успешной оплаты вы получите данные для подключения.",
-            reply_markup=markup
+        # Send the configuration in a separate message
+        await bot.send_message(
+            chat_id=callback_query.message.chat.id,
+            text=f"Ваша конфигурация:\n\n{config_text}"
         )
-    except Exception as e:
-        logger.error(f"Payment creation error: {e}")
-        await callback_query.answer("Произошла ошибка при создании платежа. Попробуйте позже.")
+    else:
+        await callback_query.answer("Оплата еще не поступила. Попробуйте проверить позже.")
 
-@dp.callback_query_handler(lambda c: c.data == "license_info")
-async def license_info_callback(callback_query: types.CallbackQuery):
-    user_id = str(callback_query.from_user.id)
-    try:
-        expiration = db.get_user_expiration(user_id)
-        if not expiration:
-            await callback_query.message.edit_text(
-                "❌ У вас нет активной лицензии",
-                reply_markup=InlineKeyboardMarkup().add(
-                    InlineKeyboardButton("« Назад", callback_data="return_home")
-                )
-            )
-            return
-            
-        expiration_date = datetime.fromisoformat(expiration)
-        days_left = (expiration_date - datetime.now()).days
-        
-        info_text = (
-            "📋 Информация о лицензии:\n\n"
-            f"📅 Действует до: {expiration_date.strftime('%d.%m.%Y')}\n"
-            f"⏳ Осталось дней: {days_left}\n"
-            "📊 Трафик: Неограниченно\n"
-        )
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            InlineKeyboardButton("🔄 Обновить конфигурацию", callback_data="regenerate_key"),
-            InlineKeyboardButton("❌ Удалить лицензию", callback_data="delete_license"),
+@dp.callback_query_handler(lambda c: c.data == 'payment_history')
+async def show_payment_history(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен")
+        return
+    
+    payments = payment.get_all_payments()
+    text = "История платежей:\n\n"
+    for payment_id, payment_data in payments.items():
+        text += f"ID: {payment_id}\n"
+        text += f"Пользователь: {payment_data['user_id']}\n"
+        text += f"Сумма: {payment_data['amount']} RUB\n"
+        text += f"Статус: {payment_data['status']}\n"
+        text += f"Дата: {payment_data['created_at']}\n\n"
+    
+    await bot.edit_message_text(
+        chat_id=callback_query.message.chat.id,
+        message_id=callback_query.message.message_id,
+        text=text,
+        reply_markup=InlineKeyboardMarkup().add(
             InlineKeyboardButton("« Назад", callback_data="return_home")
         )
-        
-        await callback_query.message.edit_text(info_text, reply_markup=markup)
-    except Exception as e:
-        logger.error(f"Error in license_info_callback: {e}")
-        await callback_query.answer("Произошла ошибка при получении информации о лицензии", show_alert=True)
-
-@dp.callback_query_handler(lambda c: c.data == "regenerate_key")
-async def regenerate_key_callback(callback_query: types.CallbackQuery):
-    user_id = str(callback_query.from_user.id)
-    try:
-        # Check if user has an active license
-        if not db.get_user_expiration(user_id):
-            await callback_query.answer("У вас нет активной лицензии", show_alert=True)
-            return
-            
-        # Generate new VPN key
-        vpn_key = await generate_vpn_key(user_id)
-        if not vpn_key:
-            raise Exception("Failed to generate new VPN key")
-            
-        # Send new VPN key to user
-        conf_path = os.path.join('users', user_id, f'{user_id}.conf')
-        if os.path.exists(conf_path):
-            instruction_text = (
-                "AmneziaVPN [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn&hl=ru), "
-                "[GitHub](https://github.com/amnezia-vpn/amnezia-client)"
-            )
-            formatted_key = format_vpn_key(vpn_key)
-            key_message = f"```\n{formatted_key}\n```"
-            
-            with open(conf_path, 'rb') as config_file:
-                await bot.send_document(
-                    callback_query.message.chat.id,
-                    config_file,
-                    caption=f"{instruction_text}\n{key_message}",
-                    parse_mode="Markdown"
-                )
-        
-        await callback_query.message.edit_text(
-            "✅ Новая конфигурация успешно сгенерирована и отправлена выше",
-            reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("« Назад", callback_data="return_home")
-            )
-        )
-    except Exception as e:
-        logger.error(f"Error in regenerate_key_callback: {e}")
-        await callback_query.answer("Произошла ошибка при обновлении конфигурации", show_alert=True)
-
-@dp.callback_query_handler(lambda c: c.data == "delete_license")
-async def delete_license_callback(callback_query: types.CallbackQuery):
-    user_id = str(callback_query.from_user.id)
-    try:
-        # Check if user has an active license
-        if not db.get_user_expiration(user_id):
-            await callback_query.answer("У вас нет активной лицензии", show_alert=True)
-            return
-            
-        # Remove user's license
-        db.remove_user_expiration(user_id)
-        
-        # Deactivate user in WireGuard
-        await deactivate_user(user_id)
-        
-        await callback_query.message.edit_text(
-            "✅ Лицензия успешно удалена",
-            reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("« Назад", callback_data="return_home")
-            )
-        )
-    except Exception as e:
-        logger.error(f"Error in delete_license_callback: {e}")
-        await callback_query.answer("Произошла ошибка при удалении лицензии", show_alert=True)
-
-@dp.message_handler(commands=['broadcast'])
-async def broadcast_command(message: types.Message):
-    """Start broadcast message creation"""
-    await BroadcastStates.waiting_for_message.set()
-    await message.reply(
-        "📢 Введите сообщение для рассылки\n"
-        "Поддерживается HTML-форматирование\n"
-        "Для отмены используйте /cancel",
-        reply_markup=types.ReplyKeyboardRemove()
     )
 
-@dp.message_handler(state=BroadcastStates.waiting_for_message)
-async def process_broadcast_message(message: types.Message, state: FSMContext):
-    """Process broadcast message and start sending"""
-    if message.text == '/cancel':
-        await state.finish()
-        await message.reply("Рассылка отменена", reply_markup=get_admin_keyboard())
+@dp.callback_query_handler(lambda c: c.data == 'mass_message')
+async def start_mass_message(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен")
         return
-        
-    try:
-        # Store the message
-        await state.update_data(broadcast_message=message.text)
-        
-        # Ask for confirmation
-        markup = InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_broadcast"),
-            InlineKeyboardButton("❌ Отменить", callback_data="cancel_broadcast")
+    
+    await bot.edit_message_text(
+        chat_id=callback_query.message.chat.id,
+        message_id=callback_query.message.message_id,
+        text="Отправьте сообщение, которое нужно разослать всем пользователям:",
+        reply_markup=InlineKeyboardMarkup().add(
+            InlineKeyboardButton("« Отмена", callback_data="return_home")
         )
-        
-        preview = f"📢 Предпросмотр сообщения:\n\n{message.text}"
-        await message.reply(preview, reply_markup=markup, parse_mode=types.ParseMode.HTML)
-        
-    except Exception as e:
-        logger.error(f"Error in process_broadcast_message: {e}")
-        await message.reply("Произошла ошибка при подготовке рассылки")
-        await state.finish()
+    )
+    
+    # Set state for next message
+    dp.register_message_handler(handle_mass_message)
 
-@dp.callback_query_handler(lambda c: c.data in ["confirm_broadcast", "cancel_broadcast"], state=BroadcastStates.waiting_for_message)
-async def broadcast_confirmation(callback_query: types.CallbackQuery, state: FSMContext):
-    """Handle broadcast confirmation"""
-    if callback_query.data == "cancel_broadcast":
-        await state.finish()
-        await callback_query.message.edit_text("Рассылка отменена")
+async def handle_mass_message(message: types.Message):
+    if message.from_user.id != admin:
         return
-        
-    try:
-        # Get the message
-        data = await state.get_data()
-        message_text = data['broadcast_message']
-        
-        # Get all users
-        users = db.get_all_users()
-        total_users = len(users)
-        
-        if not users:
-            await callback_query.message.edit_text("❌ Нет пользователей для рассылки")
-            await state.finish()
-            return
-            
-        # Start progress message
-        progress_message = await callback_query.message.edit_text(
-            "⏳ Начинаем рассылку...\n"
-            f"Всего пользователей: {total_users}"
-        )
-        
-        # Send messages
-        success_count = 0
-        error_count = 0
-        
-        for i, user_id in enumerate(users, 1):
-            try:
-                await bot.send_message(
-                    user_id,
-                    message_text,
-                    parse_mode=types.ParseMode.HTML
-                )
-                success_count += 1
-            except Exception as e:
-                logger.error(f"Error sending broadcast to {user_id}: {e}")
-                error_count += 1
-                
-            # Update progress every 10 users
-            if i % 10 == 0:
-                await progress_message.edit_text(
-                    f"⏳ Отправлено: {i}/{total_users}\n"
-                    f"✅ Успешно: {success_count}\n"
-                    f"❌ Ошибок: {error_count}"
-                )
-                
-        # Final status
-        await progress_message.edit_text(
-            "✅ Рассылка завершена\n\n"
-            f"📊 Статистика:\n"
-            f"👥 Всего пользователей: {total_users}\n"
-            f"✅ Успешно доставлено: {success_count}\n"
-            f"❌ Ошибок доставки: {error_count}"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in broadcast_confirmation: {e}")
-        await callback_query.message.edit_text("❌ Произошла ошибка при выполнении рассылки")
-        
-    finally:
-        await state.finish()
+    
+    # Get all users from the database
+    users = db.get_clients_from_clients_table()
+    sent_count = 0
+    
+    for user in users:
+        try:
+            await bot.send_message(chat_id=int(user), text=message.text)
+            sent_count += 1
+        except:
+            continue
+    
+    await message.reply(f"Сообщение отправлено {sent_count} пользователям.")
+    
+    # Remove the message handler
+    dp.message_handlers.unregister(handle_mass_message)
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)
