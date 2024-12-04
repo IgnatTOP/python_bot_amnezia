@@ -597,16 +597,12 @@ async def list_users_callback(callback_query: types.CallbackQuery):
     main_chat_id = user_main_messages.get(admin, {}).get('chat_id')
     main_message_id = user_main_messages.get(admin, {}).get('message_id')
     if main_chat_id and main_message_id:
-        try:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text="Выберите пользователя:",
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при редактировании сообщения: {e}")
-            await callback_query.answer("Ошибка при обновлении сообщения.", show_alert=True)
+        await bot.edit_message_text(
+            chat_id=main_chat_id,
+            message_id=main_message_id,
+            text="Выберите пользователя:",
+            reply_markup=keyboard
+        )
     else:
         sent_message = await callback_query.message.reply("Выберите пользователя:", reply_markup=keyboard)
         user_main_messages[admin] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
@@ -1037,64 +1033,58 @@ async def update_all_clients_traffic():
                 await deactivate_user(username)
     logger.info("Завершено обновление трафика для всех клиентов.")
 
-async def generate_vpn_key(conf_path: str) -> str:
+async def generate_vpn_key(username: str) -> Optional[str]:
+    """Generate VPN configuration for a user"""
     try:
         # Create VPN configuration using existing scripts
-        result = await asyncio.create_subprocess_shell(
-            f'./newclient.sh {conf_path}',
+        endpoint = settings.get('endpoint', 'http://localhost:8080')
+        wg_config = '/etc/wireguard/wg0.conf'
+        docker_container = settings.get('docker_container', 'amnezia-node')
+        
+        process = await asyncio.create_subprocess_shell(
+            f'./add-client.sh "{username}" "{endpoint}" "{wg_config}" "{docker_container}"',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd="/home/ignat/awg-docker-bot"  # Явно указываем рабочую директорию
+            cwd="/home/ignat/awg-docker-bot"
         )
-        stdout, stderr = await result.communicate()
+        stdout, stderr = await process.communicate()
         
-        if result.returncode != 0:
-            logger.error(f"Error generating VPN config: {stderr.decode()}")
+        if process.returncode != 0:
+            logger.error(f"Error in add-client.sh: {stderr.decode()}")
             return None
             
-        config_path = f'/etc/wireguard/clients/{conf_path}.conf'
-        qr_path = f'/etc/wireguard/clients/{conf_path}_qr.png'
+        # Check if configuration file exists
+        conf_path = os.path.join('users', username, f'{username}.conf')
+        if not os.path.exists(conf_path):
+            logger.error(f"Config file not found: {conf_path}")
+            return None
+            
+        # Generate VPN key from configuration
+        process = await asyncio.create_subprocess_exec(
+            'python3',
+            'awg-decode.py',
+            '--encode',
+            conf_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd="/home/ignat/awg-docker-bot"
+        )
+        stdout, stderr = await process.communicate()
         
-        if not os.path.exists(config_path):
-            logger.error(f"Config file not found: {config_path}")
+        if process.returncode != 0:
+            logger.error(f"Error in awg-decode.py: {stderr.decode()}")
             return None
             
-        if not os.path.exists(qr_path):
-            logger.error(f"QR file not found: {qr_path}")
+        vpn_key = stdout.decode().strip()
+        if not vpn_key.startswith('vpn://'):
+            logger.error(f"Invalid VPN key format: {vpn_key}")
             return None
             
-        return {
-            'config_path': config_path,
-            'qr_path': qr_path
-        }
+        return vpn_key
+        
     except Exception as e:
-        logger.error(f"Error in generate_vpn_config: {e}")
+        logger.error(f"Error in generate_vpn_key: {e}")
         return None
-
-async def send_vpn_config(chat_id: int, config_data: dict):
-    """Send VPN configuration file and QR code to user"""
-    if not config_data:
-        raise Exception("No config data provided")
-        
-    try:
-        # Send configuration file
-        with open(config_data['config_path'], 'rb') as config_file:
-            await bot.send_document(
-                chat_id,
-                types.InputFile(config_file.name),
-                caption="📝 Конфигурационный файл WireGuard"
-            )
-        
-        # Send QR code
-        with open(config_data['qr_path'], 'rb') as qr_file:
-            await bot.send_photo(
-                chat_id,
-                types.InputFile(qr_file.name),
-                caption="📱 QR-код для быстрой настройки"
-            )
-    except Exception as e:
-        logger.error(f"Error sending VPN config: {e}")
-        raise Exception("Failed to send VPN configuration")
 
 @dp.callback_query_handler(lambda c: c.data == "add_user")
 async def add_user_callback(callback_query: types.CallbackQuery):
@@ -1107,17 +1097,32 @@ async def add_user_callback(callback_query: types.CallbackQuery):
         # Generate username
         username = f"user_{uuid.uuid4().hex[:8]}"
         
-        # Generate VPN config
-        config_data = await generate_vpn_key(username)
-        if not config_data:
-            raise Exception("Failed to generate VPN configuration")
+        # Generate VPN key
+        vpn_key = await generate_vpn_key(username)
+        if not vpn_key:
+            raise Exception("Failed to generate VPN key")
             
         # Set default expiration (30 days)
         expiration_date = datetime.now() + timedelta(days=30)
         db.set_user_expiration(username, expiration_date, "Неограниченно")
         
         # Send config to admin
-        await send_vpn_config(callback_query.message.chat.id, config_data)
+        conf_path = os.path.join('users', username, f'{username}.conf')
+        if os.path.exists(conf_path):
+            instruction_text = (
+                "AmneziaVPN [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn&hl=ru), "
+                "[GitHub](https://github.com/amnezia-vpn/amnezia-client)"
+            )
+            formatted_key = format_vpn_key(vpn_key)
+            key_message = f"```\n{formatted_key}\n```"
+            
+            with open(conf_path, 'rb') as config_file:
+                await bot.send_document(
+                    callback_query.message.chat.id,
+                    config_file,
+                    caption=f"{instruction_text}\n{key_message}",
+                    parse_mode="Markdown"
+                )
         
         await callback_query.message.edit_text(
             f"✅ Пользователь успешно создан\n\n"
@@ -1165,34 +1170,47 @@ async def check_payment_callback(callback_query: types.CallbackQuery):
                 
             expiration_date = datetime.now() + timedelta(days=days)
             
-            # Generate VPN configuration
-            config_data = await generate_vpn_key(user_id)
-            if not config_data:
-                raise Exception("Failed to generate VPN configuration")
+            # Generate VPN key
+            vpn_key = await generate_vpn_key(user_id)
+            if not vpn_key:
+                raise Exception("Failed to generate VPN key")
             
             # Save license information
             db.set_user_expiration(user_id, expiration_date, "Неограниченно")
             
             # Send configuration to user
-            await send_vpn_config(callback_query.message.chat.id, config_data)
+            conf_path = os.path.join('users', user_id, f'{user_id}.conf')
+            if os.path.exists(conf_path):
+                instruction_text = (
+                    "AmneziaVPN [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn&hl=ru), "
+                    "[GitHub](https://github.com/amnezia-vpn/amnezia-client)"
+                )
+                formatted_key = format_vpn_key(vpn_key)
+                key_message = f"```\n{formatted_key}\n```"
+                
+                with open(conf_path, 'rb') as config_file:
+                    await bot.send_document(
+                        callback_query.message.chat.id,
+                        config_file,
+                        caption=f"{instruction_text}\n{key_message}",
+                        parse_mode="Markdown"
+                    )
             
             success_text = (
                 "✅ Оплата успешно произведена!\n\n"
                 f"📅 Срок действия: {expiration_date.strftime('%d.%m.%Y')}\n"
                 "📊 Трафик: Неограниченно\n\n"
-                "⚙️ Конфигурация VPN отправлена выше.\n"
-                "📱 Установите приложение WireGuard для вашей платформы:\n"
-                "• iOS: https://apps.apple.com/app/wireguard/id1441195209\n"
-                "• Android: https://play.google.com/store/apps/details?id=com.wireguard.android\n"
-                "• Windows: https://download.wireguard.com/windows-client/wireguard-installer.exe\n"
-                "• macOS: https://apps.apple.com/app/wireguard/id1451685025"
+                "⚙️ Конфигурация отправлена выше.\n"
+                "📱 Установите приложение AmneziaVPN:\n"
+                "• [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn)\n"
+                "• [GitHub](https://github.com/amnezia-vpn/amnezia-client)"
             )
             
             markup = InlineKeyboardMarkup().add(
                 InlineKeyboardButton("« Главное меню", callback_data="return_home")
             )
             
-            await callback_query.message.edit_text(success_text, reply_markup=markup)
+            await callback_query.message.edit_text(success_text, reply_markup=markup, parse_mode="Markdown")
             logger.info(f"Successfully processed payment {payment_id} for user {user_id}")
             
         else:
@@ -1398,7 +1416,7 @@ async def handle_user_vpn_access(user_id: int, username: str):
     
     return True, None
 
-@dp.callback_query_handler(lambda c: c.data == 'buy_license')
+@dp.callback_query_handler(lambda c: c.data == "buy_license")
 async def buy_license_callback(callback_query: types.CallbackQuery):
     markup = InlineKeyboardMarkup(row_width=2)
     for plan, price in LICENSE_PRICES.items():
@@ -1486,18 +1504,33 @@ async def license_info_callback(callback_query: types.CallbackQuery):
 async def regenerate_key_callback(callback_query: types.CallbackQuery):
     user_id = str(callback_query.from_user.id)
     try:
-        # Проверяем наличие активной лицензии
+        # Check if user has an active license
         if not db.get_user_expiration(user_id):
             await callback_query.answer("У вас нет активной лицензии", show_alert=True)
             return
             
-        # Генерируем новую конфигурацию
-        config_data = await generate_vpn_key(user_id)
-        if not config_data:
-            raise Exception("Failed to generate new configuration")
+        # Generate new VPN key
+        vpn_key = await generate_vpn_key(user_id)
+        if not vpn_key:
+            raise Exception("Failed to generate new VPN key")
             
-        # Отправляем новую конфигурацию
-        await send_vpn_config(callback_query.message.chat.id, config_data)
+        # Send new VPN key to user
+        conf_path = os.path.join('users', user_id, f'{user_id}.conf')
+        if os.path.exists(conf_path):
+            instruction_text = (
+                "AmneziaVPN [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn&hl=ru), "
+                "[GitHub](https://github.com/amnezia-vpn/amnezia-client)"
+            )
+            formatted_key = format_vpn_key(vpn_key)
+            key_message = f"```\n{formatted_key}\n```"
+            
+            with open(conf_path, 'rb') as config_file:
+                await bot.send_document(
+                    callback_query.message.chat.id,
+                    config_file,
+                    caption=f"{instruction_text}\n{key_message}",
+                    parse_mode="Markdown"
+                )
         
         await callback_query.message.edit_text(
             "✅ Новая конфигурация успешно сгенерирована и отправлена выше",
@@ -1513,14 +1546,15 @@ async def regenerate_key_callback(callback_query: types.CallbackQuery):
 async def delete_license_callback(callback_query: types.CallbackQuery):
     user_id = str(callback_query.from_user.id)
     try:
+        # Check if user has an active license
         if not db.get_user_expiration(user_id):
             await callback_query.answer("У вас нет активной лицензии", show_alert=True)
             return
             
-        # Удаляем лицензию
+        # Remove user's license
         db.remove_user_expiration(user_id)
         
-        # Деактивируем пользователя в WireGuard
+        # Deactivate user in WireGuard
         await deactivate_user(user_id)
         
         await callback_query.message.edit_text(
