@@ -1125,22 +1125,22 @@ SUBSCRIPTION_DAYS = {
 }
 
 def get_user_menu_keyboard():
-    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
-        InlineKeyboardButton("💳 Оплатить доступ", callback_data="buy_subscription"),
-        InlineKeyboardButton("🔑 Получить ключ", callback_data="get_key"),
-        InlineKeyboardButton("🔄 Перевыпустить ключ", callback_data="reissue_key"),
-        InlineKeyboardButton("👤 Мой профиль", callback_data="profile"),
-        InlineKeyboardButton("📖 Инструкция", callback_data="instruction")
+        InlineKeyboardButton("🛒 Купить VPN", callback_data="buy_subscription"),
+        InlineKeyboardButton("🔑 Мои ключи", callback_data="my_keys"),
+        InlineKeyboardButton("💳 История платежей", callback_data="payment_history"),
+        InlineKeyboardButton("ℹ️ Статус подписки", callback_data="subscription_status")
     )
     return keyboard
 
 def get_admin_menu_keyboard():
-    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
-        InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
-        InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
-        InlineKeyboardButton("👥 Управление пользователями", callback_data="admin_users")
+        InlineKeyboardButton("👥 Список клиентов", callback_data="list_users"),
+        InlineKeyboardButton("📊 История платежей", callback_data="admin_payments"),
+        InlineKeyboardButton("📨 Рассылка", callback_data="broadcast"),
+        InlineKeyboardButton("💾 Создать бекап", callback_data="create_backup")
     )
     return keyboard
 
@@ -1167,22 +1167,22 @@ async def process_buy_subscription(callback_query: types.CallbackQuery):
     )
 
 @dp.callback_query_handler(lambda c: c.data.startswith("sub_"))
-async def process_subscription_selection(callback_query: types.CallbackQuery):
-    period = callback_query.data.replace("sub_", "")
+async def process_subscription_selection(callback: types.CallbackQuery):
+    period = callback.data.replace("sub_", "")
     amount = SUBSCRIPTION_PRICES.get(period)
     
     if not amount:
-        await callback_query.answer("Неверный период подписки", show_alert=True)
+        await callback.answer("Неверный период подписки", show_alert=True)
         return
     
     # Create payment
     payment_result = await payment_manager.create_payment(
-        callback_query.from_user.id,
+        callback.from_user.id,
         amount
     )
     
     if not payment_result:
-        await callback_query.answer("Ошибка создания платежа. Попробуйте позже.", show_alert=True)
+        await callback.answer("Ошибка создания платежа. Попробуйте позже.", show_alert=True)
         return
     
     keyboard = InlineKeyboardMarkup(row_width=1)
@@ -1198,8 +1198,8 @@ async def process_subscription_selection(callback_query: types.CallbackQuery):
         "1. Нажмите кнопку «Оплатить»\n"
         "2. Оплатите счет\n"
         "3. Вернитесь в бот и нажмите «Проверить оплату»",
-        callback_query.from_user.id,
-        callback_query.message.message_id,
+        callback.from_user.id,
+        callback.message.message_id,
         reply_markup=keyboard
     )
 
@@ -1225,5 +1225,227 @@ async def process_check_payment(callback_query: types.CallbackQuery):
         await callback_query.answer("Платеж еще обрабатывается. Попробуйте проверить через минуту.", show_alert=True)
     else:
         await callback_query.answer(f"Статус платежа: {status}. Попробуйте оплатить заново.", show_alert=True)
+
+async def process_my_keys(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    user = get_user(user_id)
+    
+    if not user or not user.get('is_active'):
+        await callback_query.answer("У вас нет активной подписки")
+        return
+    
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton("🔄 Перевыпустить ключ", callback_data="reissue_key"),
+        InlineKeyboardButton("❌ Удалить ключ", callback_data="delete_key"),
+        InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")
+    )
+    
+    current_key = user.get('current_key')
+    message = "🔑 Управление ключами\n\n"
+    if current_key:
+        message += f"Ваш текущий ключ: `{current_key}`"
+    else:
+        message += "У вас нет активного ключа"
+    
+    await callback_query.message.edit_text(message, reply_markup=keyboard, parse_mode="Markdown")
+
+async def process_payment_history(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    payments = load_payments()
+    
+    user_payments = [p for p in payments.values() if p['user_id'] == str(user_id)]
+    user_payments.sort(key=lambda x: datetime.fromisoformat(x['created_at']), reverse=True)
+    
+    message = "💳 История платежей\n\n"
+    if user_payments:
+        for payment in user_payments[:10]:  # Показываем последние 10 платежей
+            status = "✅" if payment['status'] == 'succeeded' else "⏳"
+            date = datetime.fromisoformat(payment['created_at']).strftime("%d.%m.%Y %H:%M")
+            message += f"{status} {date} - {payment['amount']} ₽\n"
+    else:
+        message += "У вас пока нет платежей"
+    
+    keyboard = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("◀️ Назад", callback_data="return_to_menu")
+    )
+    
+    await callback_query.message.edit_text(message, reply_markup=keyboard)
+
+async def process_subscription_status(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    user = get_user(user_id)
+    
+    message = "ℹ️ Статус подписки\n\n"
+    if user and user.get('is_active'):
+        end_date = datetime.fromisoformat(user['subscription_end'])
+        days_left = (end_date - datetime.now()).days
+        message += f"Статус: ✅ Активна\n"
+        message += f"Действует до: {end_date.strftime('%d.%m.%Y')}\n"
+        message += f"Осталось дней: {days_left}\n"
+        
+        # Добавляем информацию о трафике
+        traffic_limit = get_user_traffic_limit(user.get('username'))
+        if traffic_limit:
+            message += f"Лимит трафика: {traffic_limit}\n"
+    else:
+        message += "Статус: ❌ Неактивна\n\n"
+        message += "Для покупки подписки нажмите '🛒 Купить VPN'"
+    
+    keyboard = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("◀️ Назад", callback_data="return_to_menu")
+    )
+    
+    await callback_query.message.edit_text(message, reply_markup=keyboard)
+
+async def process_reissue_key(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    user = get_user(user_id)
+    
+    if not user or not user.get('is_active'):
+        await callback_query.answer("У вас нет активной подписки")
+        return
+    
+    key_manager = KeyManager()
+    await key_manager.revoke_key(user_id)
+    days_left = (datetime.fromisoformat(user['subscription_end']) - datetime.now()).days
+    await key_manager.issue_new_key(user_id, days_left)
+    
+    await callback_query.answer("Ключ успешно перевыпущен!")
+    await process_my_keys(callback_query)
+
+async def process_delete_key(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    user = get_user(user_id)
+    
+    if not user or not user.get('is_active'):
+        await callback_query.answer("У вас нет активной подписки")
+        return
+    
+    key_manager = KeyManager()
+    await key_manager.revoke_key(user_id)
+    
+    await callback_query.answer("Ключ успешно удален!")
+    await process_my_keys(callback_query)
+
+dp.register_callback_query_handler(process_my_keys, lambda c: c.data == 'my_keys')
+dp.register_callback_query_handler(process_payment_history, lambda c: c.data == 'payment_history')
+dp.register_callback_query_handler(process_subscription_status, lambda c: c.data == 'subscription_status')
+dp.register_callback_query_handler(process_reissue_key, lambda c: c.data == 'reissue_key')
+dp.register_callback_query_handler(process_delete_key, lambda c: c.data == 'delete_key')
+
+class BroadcastStates(StatesGroup):
+    waiting_for_message = State()
+    confirm_broadcast = State()
+
+async def process_admin_payments(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        return
+        
+    payments = load_payments()
+    all_payments = list(payments.values())
+    all_payments.sort(key=lambda x: datetime.fromisoformat(x['created_at']), reverse=True)
+    
+    message = "📊 История платежей\n\n"
+    total_amount = sum(float(p['amount']) for p in all_payments if p['status'] == 'succeeded')
+    message += f"Общая сумма успешных платежей: {total_amount} ₽\n\n"
+    
+    if all_payments:
+        for payment in all_payments[:20]:  # Показываем последние 20 платежей
+            status = "✅" if payment['status'] == 'succeeded' else "⏳"
+            date = datetime.fromisoformat(payment['created_at']).strftime("%d.%m.%Y %H:%M")
+            user = get_user(int(payment['user_id']))
+            username = user['username'] if user else 'Unknown'
+            message += f"{status} {date} - {payment['amount']} ₽ от @{username}\n"
+    else:
+        message += "Платежей пока нет"
+    
+    keyboard = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("◀️ Назад", callback_data="return_to_admin_menu")
+    )
+    
+    await callback_query.message.edit_text(message, reply_markup=keyboard)
+
+async def start_broadcast(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != admin:
+        return
+        
+    await BroadcastStates.waiting_for_message.set()
+    
+    keyboard = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")
+    )
+    
+    await callback_query.message.edit_text(
+        "📨 Введите сообщение для рассылки всем пользователям:",
+        reply_markup=keyboard
+    )
+
+async def process_broadcast_message(message: types.Message, state: FSMContext):
+    if message.from_user.id != admin:
+        return
+        
+    async with state.proxy() as data:
+        data['broadcast_message'] = message.text
+        data['message_id'] = message.message_id
+    
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_broadcast"),
+        InlineKeyboardButton("❌ Отмена", callback_data="cancel_broadcast")
+    )
+    
+    preview_message = f"📨 Предпросмотр сообщения:\n\n{message.text}\n\nОтправить это сообщение всем пользователям?"
+    await message.answer(preview_message, reply_markup=keyboard)
+
+async def confirm_broadcast(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != admin:
+        return
+        
+    async with state.proxy() as data:
+        broadcast_message = data['broadcast_message']
+    
+    users = get_all_users()
+    sent_count = 0
+    total_count = len(users)
+    
+    progress_message = await callback_query.message.edit_text(
+        f"📨 Отправка сообщений...\n0/{total_count} отправлено"
+    )
+    
+    for user_id in users:
+        try:
+            await bot.send_message(int(user_id), broadcast_message)
+            sent_count += 1
+            if sent_count % 10 == 0:  # Обновляем прогресс каждые 10 сообщений
+                await progress_message.edit_text(
+                    f"📨 Отправка сообщений...\n{sent_count}/{total_count} отправлено"
+                )
+        except Exception as e:
+            logger.error(f"Error sending broadcast to {user_id}: {e}")
+    
+    keyboard = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("◀️ Вернуться в меню", callback_data="return_to_admin_menu")
+    )
+    
+    await progress_message.edit_text(
+        f"✅ Рассылка завершена!\n\nОтправлено: {sent_count}/{total_count} сообщений",
+        reply_markup=keyboard
+    )
+    await state.finish()
+
+async def cancel_broadcast(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != admin:
+        return
+        
+    await state.finish()
+    keyboard = get_admin_menu_keyboard()
+    await callback_query.message.edit_text("🏠 Главное меню администратора:", reply_markup=keyboard)
+
+dp.register_callback_query_handler(process_admin_payments, lambda c: c.data == 'admin_payments')
+dp.register_callback_query_handler(start_broadcast, lambda c: c.data == 'broadcast')
+dp.register_callback_query_handler(confirm_broadcast, lambda c: c.data == 'confirm_broadcast', state=BroadcastStates.waiting_for_message)
+dp.register_callback_query_handler(cancel_broadcast, lambda c: c.data == 'cancel_broadcast', state='*')
+dp.register_message_handler(process_broadcast_message, state=BroadcastStates.waiting_for_message)
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)
