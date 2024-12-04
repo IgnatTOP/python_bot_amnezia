@@ -584,8 +584,7 @@ async def list_users_callback(callback_query: types.CallbackQuery):
     active_clients_dict = {}
     for client in active_clients:
         username = client[0]
-        last_handshake = client[1]
-        active_clients_dict[username] = last_handshake
+        active_clients_dict[username] = client[1]
     keyboard = InlineKeyboardMarkup(row_width=2)
     now = datetime.now(pytz.UTC)
     for client in clients:
@@ -1231,25 +1230,66 @@ async def process_subscription_selection(callback: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith("check_payment_"))
 async def process_check_payment(callback_query: types.CallbackQuery):
     payment_id = callback_query.data.replace("check_payment_", "")
-    status = await payment_manager.check_payment_status(payment_id)
+    payment_info = await payment_manager.check_payment(payment_id)
     
-    if not status:
-        await callback_query.answer("Ошибка проверки платежа. Попробуйте позже.", show_alert=True)
+    if not payment_info:
+        await callback_query.answer("Ошибка при проверке платежа", show_alert=True)
         return
-    
-    if status == "succeeded":
-        # Payment successful
-        await bot.edit_message_text(
-            "✅ Оплата прошла успешно!\n\n"
-            "🔑 Теперь вы можете получить свой ключ в главном меню.",
-            callback_query.from_user.id,
-            callback_query.message.message_id,
-            reply_markup=get_user_menu_keyboard()
-        )
-    elif status == "pending":
-        await callback_query.answer("Платеж еще обрабатывается. Попробуйте проверить через минуту.", show_alert=True)
+        
+    status = payment_info.get('status')
+    if status == 'succeeded':
+        # Получаем информацию о платеже
+        payments = load_payments()
+        payment_data = payments.get(payment_id)
+        if not payment_data:
+            await callback_query.answer("Ошибка: информация о платеже не найдена", show_alert=True)
+            return
+            
+        amount = float(payment_data['amount'])
+        days = SUBSCRIPTION_DAYS.get("1_month", 30)  # По умолчанию 30 дней
+        
+        # Определяем количество дней по сумме платежа
+        for period, price in SUBSCRIPTION_PRICES.items():
+            if abs(price - amount) < 1:  # Небольшая погрешность для float
+                days = SUBSCRIPTION_DAYS[period]
+                break
+        
+        # Выпускаем ключ
+        user_id = callback_query.from_user.id
+        key_manager = KeyManager()
+        new_key = await key_manager.issue_new_key(user_id, days)
+        
+        if new_key:
+            message = (
+                "✅ Оплата прошла успешно!\n\n"
+                f"🔑 Ваш ключ доступа: `{new_key}`\n"
+                f"📅 Срок действия: {days} дней\n\n"
+                "Сохраните этот ключ, он понадобится для подключения."
+            )
+            keyboard = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("◀️ Вернуться в меню", callback_data="return_to_menu")
+            )
+            await callback_query.message.edit_text(message, reply_markup=keyboard, parse_mode="Markdown")
+        else:
+            await callback_query.answer("Ошибка при создании ключа", show_alert=True)
     else:
         await callback_query.answer(f"Статус платежа: {status}. Попробуйте оплатить заново.", show_alert=True)
+
+async def return_to_menu(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    if user_id == admin:
+        keyboard = get_admin_menu_keyboard()
+        await callback_query.message.edit_text("🏠 Главное меню администратора:", reply_markup=keyboard)
+    else:
+        keyboard = get_user_menu_keyboard()
+        await callback_query.message.edit_text(
+            "🏠 Главное меню\n"
+            "Выберите действие:",
+            reply_markup=keyboard
+        )
+
+dp.register_callback_query_handler(return_to_menu, lambda c: c.data == "return_to_menu")
+dp.register_callback_query_handler(return_to_menu, lambda c: c.data == "back_to_main")
 
 async def process_my_keys(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id

@@ -140,7 +140,7 @@ class KeyManager:
         return str(uuid.uuid4())
 
     @staticmethod
-    def issue_new_key(user_id: int, days: int = 30) -> Optional[str]:
+    async def issue_new_key(user_id: int, days: int = 30) -> Optional[str]:
         """Issue a new key for the user and update their subscription"""
         user = db.get_user(user_id)
         if not user:
@@ -149,13 +149,19 @@ class KeyManager:
         # Generate new key
         new_key = KeyManager.generate_key()
         
+        # Update user record with the new key
+        users = db.load_users()
+        users[str(user_id)]['current_key'] = new_key
+        users[str(user_id)]['is_active'] = True
+        db.save_users(users)
+        
         # Update user's subscription
         db.update_user_subscription(user_id, days)
         
         return new_key
 
     @staticmethod
-    def revoke_key(user_id: int) -> bool:
+    async def revoke_key(user_id: int) -> bool:
         """Revoke user's current key"""
         user = db.get_user(user_id)
         if not user:
