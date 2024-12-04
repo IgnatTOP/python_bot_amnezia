@@ -73,7 +73,8 @@ main_menu_markup = InlineKeyboardMarkup(row_width=1).add(
     InlineKeyboardButton("Получить конфигурацию пользователя", callback_data="get_config"),
     InlineKeyboardButton("Список клиентов", callback_data="list_users"),
     InlineKeyboardButton("Payment History", callback_data="payment_history"),
-    InlineKeyboardButton("Создать бекап", callback_data="create_backup")
+    InlineKeyboardButton("Создать бекап", callback_data="create_backup"),
+    InlineKeyboardButton("Отправить сообщение всем", callback_data="broadcast_message")
 )
 
 user_menu_markup = InlineKeyboardMarkup(row_width=1).add(
@@ -1307,5 +1308,51 @@ async def payment_history_callback(callback_query: types.CallbackQuery):
             history_text,
             reply_markup=main_menu_markup
         )
+
+@dp.callback_query_handler(lambda c: c.data == "broadcast_message")
+async def broadcast_message_prompt(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен")
+        return
+    
+    state = dp.current_state(user=callback_query.from_user.id)
+    await state.set_state("waiting_for_broadcast")
+    
+    markup = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("« Отмена", callback_data="return_home")
+    )
+    
+    await callback_query.message.edit_text(
+        "Введите сообщение для рассылки всем пользователям:",
+        reply_markup=markup
+    )
+
+@dp.message_handler(state="waiting_for_broadcast")
+async def handle_broadcast_message(message: types.Message):
+    if message.from_user.id != admin:
+        return
+    
+    state = dp.current_state(user=message.from_user.id)
+    await state.reset_state()
+    
+    users = db.get_clients_from_clients_table()
+    sent_count = 0
+    failed_count = 0
+    
+    for user in users:
+        try:
+            await bot.send_message(user['clientId'], 
+                                 f"📢 Сообщение от администратора:\n\n{message.text}")
+            sent_count += 1
+        except Exception as e:
+            logger.error(f"Failed to send broadcast to user {user['clientId']}: {e}")
+            failed_count += 1
+    
+    await message.answer(
+        f"✅ Рассылка завершена\n\n"
+        f"Отправлено: {sent_count}\n"
+        f"Ошибок: {failed_count}",
+        reply_markup=main_menu_markup
+    )
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)

@@ -248,16 +248,36 @@ set_permissions() {
 initialize_bot() {
     cd awg || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
     
+    echo -e "\n${BLUE}Инициализация бота...${NC}"
+    echo -e "${YELLOW}Пожалуйста, введите следующую информацию:${NC}"
+    
+    # Запускаем бота с перенаправлением ввода/вывода
     ../myenv/bin/python3.11 bot_manager.py < /dev/tty &
     local BOT_PID=$!
     
+    # Ожидаем создания файла конфигурации
+    local TIMEOUT=60
+    local COUNTER=0
     while [ ! -f "files/setting.ini" ]; do
         sleep 2
-        kill -0 "$BOT_PID" 2>/dev/null || { echo -e "\n${RED}Бот завершил работу до инициализации${NC}"; exit 1; }
+        ((COUNTER+=2))
+        if [ $COUNTER -ge $TIMEOUT ]; then
+            echo -e "\n${RED}Превышено время ожидания инициализации${NC}"
+            kill "$BOT_PID" 2>/dev/null
+            wait "$BOT_PID" 2>/dev/null
+            exit 1
+        fi
+        kill -0 "$BOT_PID" 2>/dev/null || { 
+            echo -e "\n${RED}Бот завершил работу до инициализации${NC}"
+            exit 1
+        }
     done
     
+    # Корректно завершаем процесс бота
     kill "$BOT_PID"
     wait "$BOT_PID" 2>/dev/null
+    
+    echo -e "\n${GREEN}Инициализация завершена успешно${NC}"
     cd ..
 }
 

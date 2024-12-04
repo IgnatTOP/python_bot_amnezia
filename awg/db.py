@@ -38,7 +38,7 @@ def create_config(path='files/setting.ini'):
     admin_id = input('Введите Telegram ID администратора: ').strip()
     yoomoney_token = input('Введите токен YooMoney API: ').strip()
     yoomoney_shop_id = input('Введите идентификатор магазина YooMoney: ').strip()
-    yoomoney_secret_key = input('Введите секретный ключ YooMoney: ').strip()
+    yoomoney_secret_key = yoomoney_token  # Use the same token for secret key
 
     docker_container = get_amnezia_container()
     logger.info(f"Найден Docker-контейнер: {docker_container}")

@@ -1,0 +1,8 @@
+{
+    "bot_token": "7782664718:AAFkre94HlYW_RCDqA2YBUc8guo2B5-EpSM",
+    "admin_id": 487523019,
+    "yoomoney_shop_id": "993270",
+    "yoomoney_secret_key": "test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE",
+    "docker_container": "amnezia-node",
+    "endpoint": "http://localhost:8080"
+}

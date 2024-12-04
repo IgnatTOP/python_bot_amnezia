@@ -45,56 +45,68 @@ class PaymentManager:
         payment_id = str(uuid.uuid4())
         amount = LICENSE_PRICES[plan]
 
-        # Create payment using YooMoney API
-        payload = {
-            "amount": {
-                "value": str(amount),
-                "currency": "RUB"
-            },
-            "capture": True,
-            "confirmation": {
-                "type": "redirect",
-                "return_url": f"https://t.me/your_bot_username"  # Replace with your bot's username
-            },
-            "description": f"VPN License {plan}",
-            "metadata": {
-                "payment_id": payment_id,
-                "user_id": user_id,
-                "plan": plan
+        try:
+            # Create payment using YooMoney API
+            payload = {
+                "amount": {
+                    "value": str(amount),
+                    "currency": "RUB"
+                },
+                "capture": True,
+                "confirmation": {
+                    "type": "redirect",
+                    "return_url": f"https://t.me/your_bot_username"  # Replace with actual bot username
+                },
+                "description": f"VPN License {plan}",
+                "metadata": {
+                    "payment_id": payment_id,
+                    "user_id": user_id,
+                    "plan": plan
+                }
             }
-        }
 
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Idempotence-Key": payment_id,
-            "Content-Type": "application/json"
-        }
-
-        response = requests.post(
-            f"https://api.yookassa.ru/v3/payments",
-            json=payload,
-            headers=headers
-        )
-
-        if response.status_code == 200:
-            payment_data = response.json()
-            confirmation_url = payment_data["confirmation"]["confirmation_url"]
-            
-            self.payments[payment_id] = {
-                "user_id": user_id,
-                "plan": plan,
-                "amount": amount,
-                "status": "pending",
-                "payment_id": payment_data["id"],
-                "created_at": datetime.now().isoformat(),
-                "completed_at": None
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Idempotence-Key": payment_id,
+                "Content-Type": "application/json"
             }
-            self._save_payments()
-            
-            return payment_id, confirmation_url
-        else:
-            logger.error(f"Failed to create payment: {response.text}")
-            raise Exception("Failed to create payment")
+
+            logger.info(f"Creating payment for user {user_id}, plan: {plan}, amount: {amount}")
+            response = requests.post(
+                "https://api.yookassa.ru/v3/payments",
+                json=payload,
+                headers=headers
+            )
+
+            if response.status_code == 200:
+                payment_data = response.json()
+                confirmation_url = payment_data["confirmation"]["confirmation_url"]
+                
+                self.payments[payment_id] = {
+                    "user_id": user_id,
+                    "plan": plan,
+                    "amount": amount,
+                    "status": "pending",
+                    "payment_id": payment_data["id"],
+                    "created_at": datetime.now().isoformat(),
+                    "completed_at": None
+                }
+                self._save_payments()
+                
+                logger.info(f"Payment created successfully: {payment_id}")
+                return payment_id, confirmation_url
+            else:
+                error_msg = f"Payment creation failed with status {response.status_code}: {response.text}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Network error during payment creation: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        except Exception as e:
+            error_msg = f"Unexpected error during payment creation: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
 
     def check_payment(self, payment_id: str) -> bool:
         if payment_id not in self.payments:
