@@ -25,7 +25,12 @@ class PaymentManager:
         self.shop_id = shop_id
         self.secret_key = secret_key
         self._load_payments()
-
+        
+        # Создаем Base64 токен для аутентификации
+        import base64
+        auth_string = f"{shop_id}:{secret_key}"
+        self.auth_token = base64.b64encode(auth_string.encode()).decode()
+        
     def _load_payments(self):
         try:
             with open(PAYMENT_FILE, 'r') as f:
@@ -67,19 +72,31 @@ class PaymentManager:
             }
 
             headers = {
-                "Authorization": f"Basic {self.token}",
+                "Authorization": f"Basic {self.auth_token}",
                 "Idempotence-Key": payment_id,
                 "Content-Type": "application/json"
             }
 
             logger.info(f"Creating payment for user {user_id}, plan: {plan}, amount: {amount}")
+            logger.debug(f"Request headers: {headers}")
+            logger.debug(f"Request payload: {payload}")
+            
             response = requests.post(
                 "https://api.yookassa.ru/v3/payments",
                 json=payload,
                 headers=headers
             )
 
-            response_data = response.json()
+            logger.debug(f"Response status: {response.status_code}")
+            logger.debug(f"Response headers: {response.headers}")
+            
+            try:
+                response_data = response.json()
+                logger.debug(f"Response data: {response_data}")
+            except ValueError as e:
+                logger.error(f"Failed to parse response as JSON: {e}")
+                logger.error(f"Raw response: {response.text}")
+                raise Exception("Invalid response from YooKassa API")
             
             if response.status_code == 200:
                 payment_data = response_data
@@ -137,7 +154,7 @@ class PaymentManager:
 
         try:
             headers = {
-                "Authorization": f"Basic {self.token}",
+                "Authorization": f"Basic {self.auth_token}",
                 "Content-Type": "application/json"
             }
 
@@ -195,3 +212,36 @@ class PaymentManager:
 
     def get_all_payments(self) -> Dict:
         return self.payments
+
+    def get_payment_status(self, payment_id: str) -> Optional[str]:
+        """Get the current status of a payment"""
+        if payment_id not in self.payments:
+            return None
+            
+        payment_data = self.payments[payment_id]
+        yookassa_payment_id = payment_data.get("payment_id")
+        
+        if not yookassa_payment_id:
+            return None
+            
+        try:
+            headers = {
+                "Authorization": f"Basic {self.auth_token}",
+                "Content-Type": "application/json"
+            }
+            
+            response = requests.get(
+                f"https://api.yookassa.ru/v3/payments/{yookassa_payment_id}",
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                payment_info = response.json()
+                return payment_info.get("status")
+            else:
+                logger.error(f"Failed to get payment status: {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting payment status: {e}")
+            return None

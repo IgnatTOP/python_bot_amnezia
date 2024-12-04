@@ -739,6 +739,27 @@ async def client_delete_callback(callback_query: types.CallbackQuery):
         return
     await callback_query.answer()
 
+@dp.callback_query_handler(lambda c: c.data == "return_home")
+async def return_home(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    is_admin = user_id == admin
+    
+    try:
+        if is_admin:
+            await callback_query.message.edit_text(
+                "Выберите действие:",
+                reply_markup=main_menu_markup
+            )
+        else:
+            await callback_query.message.edit_text(
+                "Выберите действие:",
+                reply_markup=user_menu_markup
+            )
+        await callback_query.answer()
+    except Exception as e:
+        logger.error(f"Error in return_home: {e}")
+        await callback_query.answer("Произошла ошибка при возврате в главное меню", show_alert=True)
+
 @dp.callback_query_handler(lambda c: c.data.startswith('home'))
 async def return_home(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
@@ -774,7 +795,7 @@ async def return_home(callback_query: types.CallbackQuery):
             pass
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('get_config'))
+@dp.callback_query_handler(lambda c: c.data == 'get_config')
 async def list_users_for_config(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
@@ -1181,102 +1202,94 @@ async def select_plan_callback(callback_query: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
 async def check_payment_callback(callback_query: types.CallbackQuery):
     payment_id = callback_query.data.replace('check_payment_', '')
-    if payment_manager.check_payment(payment_id):
-        payment_data = payment_manager.payments[payment_id]
-        plan = payment_data['plan']
-        user_id = callback_query.from_user.id
-        username = f"user_{user_id}"
-        
-        try:
+    user_id = callback_query.from_user.id
+    
+    try:
+        is_paid = payment_manager.check_payment(payment_id)
+        if is_paid:
+            payment_data = payment_manager.payments.get(payment_id)
+            if not payment_data:
+                raise Exception("Payment data not found")
+                
+            plan = payment_data.get('plan')
+            if not plan:
+                raise Exception("Plan not found in payment data")
+            
+            # Calculate expiration date based on plan
+            duration_map = {
+                "1_month": 30,
+                "3_months": 90,
+                "6_months": 180,
+                "12_months": 365
+            }
+            
+            days = duration_map.get(plan)
+            if not days:
+                raise Exception(f"Invalid plan: {plan}")
+                
+            expiration_date = datetime.now() + timedelta(days=days)
+            
             # Generate VPN configuration
-            vpn_config = await generate_vpn_config(username)
-            license_key = vpn_config['license_key']
-            expiration_date = datetime.now(pytz.UTC) + {
-                '1_month': timedelta(days=30),
-                '3_months': timedelta(days=90),
-                '6_months': timedelta(days=180),
-                '12_months': timedelta(days=365)
-            }[plan]
+            config_data = await generate_vpn_config(str(user_id))
+            if not config_data:
+                raise Exception("Failed to generate VPN configuration")
             
             # Save license information
-            db.save_license(username, license_key, expiration_date, plan)
+            db.set_user_expiration(str(user_id), expiration_date, "Неограниченно")
             
             # Send configuration to user
+            await send_vpn_config(callback_query.message.chat.id, config_data)
+            
+            success_text = (
+                "✅ Оплата успешно произведена!\n\n"
+                f"📅 Срок действия: {expiration_date.strftime('%d.%m.%Y')}\n"
+                "📊 Трафик: Неограниченно\n\n"
+                "⚙️ Конфигурация VPN отправлена выше.\n"
+                "📱 Установите приложение WireGuard для вашей платформы:\n"
+                "• iOS: https://apps.apple.com/app/wireguard/id1441195209\n"
+                "• Android: https://play.google.com/store/apps/details?id=com.wireguard.android\n"
+                "• Windows: https://download.wireguard.com/windows-client/wireguard-installer.exe\n"
+                "• macOS: https://apps.apple.com/app/wireguard/id1451685025"
+            )
+            
             markup = InlineKeyboardMarkup().add(
                 InlineKeyboardButton("« Главное меню", callback_data="return_home")
             )
             
-            config_text = (
-                "✅ Оплата успешно произведена!\n\n"
-                f"🔑 Ваш ключ: `{license_key}`\n"
-                f"📅 Действует до: {expiration_date.strftime('%d.%m.%Y')}\n"
-                f"📋 Тариф: {plan.replace('_', ' ').title()}\n\n"
-                "📱 Инструкция по подключению:\n"
-                "1. Установите приложение WireGuard\n"
-                "2. Отсканируйте QR-код или импортируйте конфигурацию\n"
-                "3. Нажмите 'Подключить'\n\n"
-                "Конфигурационный файл и QR-код прикреплены ниже."
+            await callback_query.message.edit_text(success_text, reply_markup=markup)
+            logger.info(f"Successfully processed payment {payment_id} for user {user_id}")
+            
+        else:
+            payment_status = payment_manager.get_payment_status(payment_id)
+            if payment_status in ["canceled", "expired"]:
+                status_text = "❌ Платёж был отменен или истек срок ожидания."
+            else:
+                status_text = "⏳ Платёж еще не подтвержден. Пожалуйста, подождите или попробуйте снова."
+            
+            markup = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("🔄 Проверить снова", callback_data=f"check_payment_{payment_id}"),
+                InlineKeyboardButton("« Отмена", callback_data="return_home")
             )
             
             await callback_query.message.edit_text(
-                config_text,
-                reply_markup=markup,
-                parse_mode="Markdown"
+                f"{status_text}\n\nID платежа: {payment_id}",
+                reply_markup=markup
             )
             
-            # Send configuration file and QR code
-            await send_vpn_config(callback_query.message.chat.id, vpn_config)
-            
-        except Exception as e:
-            logger.error(f"Error generating VPN config: {e}")
-            await callback_query.answer("Произошла ошибка при генерации конфигурации. Обратитесь в поддержку.")
-    else:
-        await callback_query.answer("Платеж не найден или еще не обработан. Попробуйте позже.")
-
-async def generate_vpn_config(username: str) -> dict:
-    """Generate VPN configuration for a user"""
-    # Generate a unique license key
-    license_key = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
-    
-    # Create VPN configuration using existing scripts
-    result = await asyncio.create_subprocess_shell(
-        f'./newclient.sh {username}',
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await result.communicate()
-    
-    if result.returncode != 0:
-        logger.error(f"Error generating VPN config: {stderr.decode()}")
-        raise Exception("Failed to generate VPN configuration")
-    
-    return {
-        'license_key': license_key,
-        'config_path': f'/etc/wireguard/clients/{username}.conf',
-        'qr_path': f'/etc/wireguard/clients/{username}_qr.png'
-    }
-
-async def send_vpn_config(chat_id: int, config_data: dict):
-    """Send VPN configuration file and QR code to user"""
-    try:
-        # Send configuration file
-        with open(config_data['config_path'], 'rb') as config_file:
-            await bot.send_document(
-                chat_id,
-                config_file,
-                caption="📝 Конфигурационный файл WireGuard"
-            )
-        
-        # Send QR code
-        with open(config_data['qr_path'], 'rb') as qr_file:
-            await bot.send_photo(
-                chat_id,
-                qr_file,
-                caption="📱 QR-код для быстрой настройки"
-            )
     except Exception as e:
-        logger.error(f"Error sending VPN config: {e}")
-        raise Exception("Failed to send VPN configuration")
+        error_msg = f"Ошибка при проверке платежа: {str(e)}"
+        logger.error(f"Payment check error for user {user_id}, payment {payment_id}: {str(e)}")
+        await callback_query.answer(error_msg, show_alert=True)
+        
+        markup = InlineKeyboardMarkup().add(
+            InlineKeyboardButton("« Главное меню", callback_data="return_home")
+        )
+        await callback_query.message.edit_text(
+            f"❌ {error_msg}\n\nОбратитесь к администратору.",
+            reply_markup=markup
+        )
+    
+    await callback_query.answer()
 
 @dp.callback_query_handler(lambda c: c.data == 'payment_history')
 async def payment_history_callback(callback_query: types.CallbackQuery):
