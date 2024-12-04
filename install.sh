@@ -195,14 +195,27 @@ check_python() {
 
     # Проверяем версию Python
     PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-    if (( $(echo "$PYTHON_VERSION < 3.7" | bc -l) )); then
+    MAJOR_VERSION=$(echo $PYTHON_VERSION | cut -d. -f1)
+    MINOR_VERSION=$(echo $PYTHON_VERSION | cut -d. -f2)
+    
+    if [ "$MAJOR_VERSION" -lt 3 ] || ([ "$MAJOR_VERSION" -eq 3 ] && [ "$MINOR_VERSION" -lt 7 ]); then
         echo -e "${RED}Требуется Python версии 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
         exit 1
     fi
 
     echo -e "${GREEN}Python $PYTHON_VERSION установлен${NC}"
 
-    # Установка pip если он отсутствует
+    # Установка # Удаляем старую установку если она есть
+    rm -rf python_bot_amnezia
+    
+    # Скачиваем установщик
+    curl -O https://raw.githubusercontent.com/IgnatTOP/python_bot_amnezia/main/install.sh
+    
+    # Делаем скрипт исполняемым
+    chmod +x install.sh
+    
+    # Запускаем установку
+    ./install.sh если он отсутствует
     if ! command -v pip3 &>/dev/null; then
         echo -e "${YELLOW}pip3 не установлен. Устанавливаем...${NC}"
         run_with_spinner "Установка pip3" "sudo apt-get install python3-pip -y -qq"
