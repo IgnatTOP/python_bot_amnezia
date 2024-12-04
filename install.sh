@@ -480,6 +480,7 @@ install_bot() {
     install_and_configure_needrestart
     clone_repository
     setup_venv
+    configure_yookassa
     initialize_bot
     create_service
 }
