@@ -197,7 +197,7 @@ check_python() {
     PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
     if (( $(echo "$PYTHON_VERSION < 3.7" | bc -l) )); then
         echo -e "${RED}Требуется Python версии 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
-        exit 1
+        return 1
     fi
 
     echo -e "${GREEN}Python $PYTHON_VERSION установлен${NC}"
@@ -210,6 +210,8 @@ check_python() {
 
     # Обновление pip до последней версии
     run_with_spinner "Обновление pip" "python3 -m pip install --upgrade pip -q"
+    
+    return 0
 }
 
 install_dependencies() {
@@ -416,7 +418,10 @@ EOF
 install_bot() {
     get_ubuntu_version
     update_and_clean_system
-    check_python
+    if ! check_python; then
+        echo -e "${RED}Ошибка при проверке Python. Установка прервана.${NC}"
+        exit 1
+    fi
     install_dependencies
     install_and_configure_needrestart
     clone_repository
