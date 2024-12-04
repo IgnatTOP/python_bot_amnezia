@@ -93,35 +93,51 @@ run_with_spinner() {
 }
 
 check_updates() {
-    local stdout_temp=$(mktemp)
-    local stderr_temp=$(mktemp)
+    echo -e "\n${BLUE}Проверка обновлений...${NC}"
     
-    if ! git pull >"$stdout_temp" 2>"$stderr_temp"; then
-        echo -e "${RED}Ошибка при проверке обновлений:${NC}"
-        cat "$stderr_temp"
-        rm -f "$stdout_temp" "$stderr_temp"
-        echo
-        return 1
+    # Проверяем наличие git репозитория
+    if [ ! -d ".git" ]; then
+        echo -e "${YELLOW}Репозиторий git не найден. Клонируем заново...${NC}"
+        cd .. || { echo -e "${RED}Ошибка перехода в родительскую директорию${NC}"; exit 1; }
+        rm -rf python_bot_amnezia
+        clone_repository
+        echo -e "${GREEN}Репозиторий успешно обновлен${NC}"
+        return 0
     fi
 
-    local changes=$(cat "$stdout_temp")
-    rm -f "$stdout_temp" "$stderr_temp"
+    # Если .git существует, проверяем обновления
+    git remote update >/dev/null 2>&1
+    
+    UPSTREAM=${1:-'@{u}'}
+    LOCAL=$(git rev-parse @)
+    REMOTE=$(git rev-parse "$UPSTREAM")
+    BASE=$(git merge-base @ "$UPSTREAM")
 
-    if [[ "$changes" == "Already up to date." ]]; then
-        echo -e "${GREEN}Обновления не требуются${NC}\n"
-    elif [[ -n "$changes" ]]; then
-        echo -e "${GREEN}Обновления установлены:${NC}"
-        echo "$changes"
-        echo
-        read -p "Требуется перезапустить службу для применения обновлений. Перезапустить? (y/n): " restart
-        if [[ "$restart" =~ ^[Yy]$ ]]; then
-            run_with_spinner "Перезапуск службы" "sudo systemctl restart $SERVICE_NAME -qq"
-            echo -e "${GREEN}Служба перезапущена${NC}\n"
-        else
-            echo -e "${YELLOW}Для применения обновлений требуется перезапустить службу${NC}\n"
-        fi
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Ошибка при проверке обновлений. Переустанавливаем репозиторий...${NC}"
+        cd .. || { echo -e "${RED}Ошибка перехода в родительскую директорию${NC}"; exit 1; }
+        rm -rf python_bot_amnezia
+        clone_repository
+        echo -e "${GREEN}Репозиторий успешно обновлен${NC}"
+        return 0
+    fi
+
+    if [ "$LOCAL" = "$REMOTE" ]; then
+        echo -e "${GREEN}Установлена последняя версия${NC}"
+    elif [ "$LOCAL" = "$BASE" ]; then
+        echo -e "${YELLOW}Найдены обновления. Обновляем...${NC}"
+        git pull >/dev/null 2>&1
+        echo -e "${GREEN}Обновление завершено${NC}"
+    elif [ "$REMOTE" = "$BASE" ]; then
+        echo -e "${YELLOW}Локальные изменения будут перезаписаны...${NC}"
+        git reset --hard origin/main >/dev/null 2>&1
+        git pull >/dev/null 2>&1
+        echo -e "${GREEN}Обновление завершено${NC}"
     else
-        echo -e "${RED}Неожиданный ответ при проверке обновлений${NC}\n"
+        echo -e "${RED}Ветки разошлись. Сбрасываем к удаленной версии...${NC}"
+        git reset --hard origin/main >/dev/null 2>&1
+        git pull >/dev/null 2>&1
+        echo -e "${GREEN}Обновление завершено${NC}"
     fi
 }
 
