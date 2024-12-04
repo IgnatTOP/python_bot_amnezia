@@ -166,18 +166,36 @@ service_control_menu() {
 
 installed_menu() {
     while true; do
-        echo -e "\n${BLUE}=== AWG Docker Telegram Bot ===${NC}"
-        echo -e "${GREEN}1${NC}. Проверить обновления"
-        echo -e "${GREEN}2${NC}. Управление службой"
-        echo -e "${YELLOW}3${NC}. Выход"
+        clear
+        echo "=== AWG Docker Telegram Bot ==="
+        echo "1. Проверить обновления"
+        echo "2. Управление службой"
+        echo "3. Полное удаление"
+        echo "4. Выход"
+        echo
+        read -p "Выберите действие: " choice
         
-        echo -ne "\n${BLUE}Выберите действие:${NC} "
-        read action
-        case $action in
-            1) check_updates ;;
-            2) service_control_menu ;;
-            3) exit 0 ;;
-            *) echo -e "${RED}Некорректный ввод${NC}" ;;
+        case $choice in
+            1)
+                check_updates
+                ;;
+            2)
+                service_control_menu
+                ;;
+            3)
+                echo -e "${RED}Вы уверены, что хотите полностью удалить бота? (y/n)${NC}"
+                read -r confirm
+                if [ "$confirm" = "y" ]; then
+                    uninstall_bot
+                fi
+                ;;
+            4)
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Неверный выбор${NC}"
+                sleep 2
+                ;;
         esac
     done
 }
@@ -201,7 +219,7 @@ check_python() {
     MIN_VERSION="3.07"  # Минимальная версия 3.7
     
     if (( $(echo "$VERSION_NORMALIZED < $MIN_VERSION" | bc -l) )); then
-        echo -e "${RED}Требуется Python версииЯЯЯЯ 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
+        echo -e "${RED}Требуется Python версии 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
         return 1
     fi
 
@@ -427,6 +445,27 @@ EOL
     run_with_spinner "Включение автозапуска" "systemctl enable $SERVICE_NAME"
     
     echo -e "\n${GREEN}Служба запущена${NC}"
+}
+
+uninstall_bot() {
+    echo -e "\n${YELLOW}Удаление AWG Docker Telegram Bot...${NC}"
+    
+    # Останавливаем и удаляем службу
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        run_with_spinner "Остановка службы" "systemctl stop $SERVICE_NAME"
+        run_with_spinner "Отключение автозапуска" "systemctl disable $SERVICE_NAME"
+        run_with_spinner "Удаление службы" "rm -f /etc/systemd/system/$SERVICE_NAME.service"
+        run_with_spinner "Обновление systemd" "systemctl daemon-reload"
+    fi
+    
+    # Удаляем файлы
+    cd ..
+    if [ -d "python_bot_amnezia" ]; then
+        run_with_spinner "Удаление файлов бота" "rm -rf python_bot_amnezia"
+    fi
+    
+    echo -e "${GREEN}Бот успешно удален${NC}"
+    exit 0
 }
 
 install_bot() {
