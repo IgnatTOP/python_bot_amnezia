@@ -1,12 +1,17 @@
+import json
 import os
 import subprocess
-import configparser
-import json
-import pytz
-import socket
+import shutil
 import logging
 import tempfile
 from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List, Union
+
+import configparser
+import pytz
+import socket
+from datetime import datetime, timedelta
+from typing import Optional
 
 # Файлы для хранения данных
 USERS_FILE = 'files/users.json'
@@ -462,3 +467,66 @@ def get_user_expiration(username: str):
 def get_user_traffic_limit(username: str):
     expirations = load_expirations()
     return expirations.get(username, {}).get('traffic_limit', "Неограниченно")
+
+async def create_client_with_key(username: str, days: int = 30) -> Optional[dict]:
+    """Create a new client with VPN key and configuration"""
+    try:
+        setting = get_config()
+        endpoint = setting.get('endpoint')
+        wg_config_file = setting.get('wg_config_file')
+        docker_container = setting.get('docker_container')
+        
+        if not all([endpoint, wg_config_file, docker_container]):
+            logger.error("Missing required configuration settings")
+            return None
+            
+        # Create client using newclient.sh
+        script_path = os.path.join(os.path.dirname(__file__), 'newclient.sh')
+        if not os.path.exists(script_path):
+            logger.error(f"Script not found: {script_path}")
+            return None
+            
+        result = subprocess.run(
+            [script_path, username, endpoint, wg_config_file, docker_container],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"Failed to create client: {result.stderr}")
+            return None
+            
+        # Read the generated configuration
+        config_path = f"users/{username}/{username}.conf"
+        if not os.path.exists(config_path):
+            logger.error(f"Configuration file not found: {config_path}")
+            return None
+            
+        with open(config_path, 'r') as f:
+            config_content = f.read()
+            
+        # Extract private key from config
+        private_key = None
+        for line in config_content.splitlines():
+            if line.startswith('PrivateKey'):
+                private_key = line.split('=')[1].strip()
+                break
+                
+        if not private_key:
+            logger.error("Private key not found in configuration")
+            return None
+            
+        # Set expiration
+        expiration_date = datetime.now() + timedelta(days=days)
+        set_user_expiration(username, expiration_date, "Неограниченно")
+        
+        return {
+            'username': username,
+            'private_key': private_key,
+            'config': config_content,
+            'expiration_date': expiration_date.isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating client: {e}")
+        return None

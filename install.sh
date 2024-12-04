@@ -400,6 +400,14 @@ setup_venv() {
     echo -e "${GREEN}✓ Виртуальное окружение настроено${NC}"
 }
 
+setup_script_permissions() {
+    local description="Настройка прав доступа скриптов"
+    run_with_spinner "$description" "
+        chmod +x $SCRIPT_DIR/awg/newclient.sh
+        chmod +x $SCRIPT_DIR/awg/*.sh 2>/dev/null || true
+    "
+}
+
 initialize_bot() {
     echo -e "\n${BLUE}Инициализация бота...${NC}"
 
@@ -462,6 +470,69 @@ uninstall_bot() {
     exit 0
 }
 
+configure_main_settings() {
+    echo -e "\n${BLUE}Настройка основных параметров бота${NC}"
+    
+    # Запрос endpoint
+    echo -e "\n${YELLOW}Введите публичный адрес вашего сервера (например: vpn.example.com):${NC}"
+    read -r endpoint
+    while [ -z "$endpoint" ]; do
+        echo -e "${RED}Адрес сервера не может быть пустым${NC}"
+        echo -e "${YELLOW}Попробуйте снова:${NC}"
+        read -r endpoint
+    done
+    
+    # Запрос пути к конфигу WireGuard
+    echo -e "\n${YELLOW}Путь к конфигурационному файлу WireGuard (по умолчанию: /etc/wireguard/wg0.conf):${NC}"
+    read -r wg_config_file
+    wg_config_file=${wg_config_file:-"/etc/wireguard/wg0.conf"}
+    
+    # Запрос имени контейнера
+    echo -e "\n${YELLOW}Имя Docker контейнера WireGuard (по умолчанию: wireguard):${NC}"
+    read -r docker_container
+    docker_container=${docker_container:-"wireguard"}
+    
+    # Запрос токена бота
+    echo -e "\n${YELLOW}Введите токен Telegram бота (получить у @BotFather):${NC}"
+    read -r bot_token
+    while [ -z "$bot_token" ]; do
+        echo -e "${RED}Токен бота не может быть пустым${NC}"
+        echo -e "${YELLOW}Попробуйте снова:${NC}"
+        read -r bot_token
+    done
+    
+    # Запрос ID администраторов
+    echo -e "\n${YELLOW}Введите ID администраторов бота через запятую (например: 123456789,987654321):${NC}"
+    read -r admin_ids_input
+    while [ -z "$admin_ids_input" ]; do
+        echo -e "${RED}Должен быть указан хотя бы один администратор${NC}"
+        echo -e "${YELLOW}Попробуйте снова:${NC}"
+        read -r admin_ids_input
+    done
+    
+    # Преобразование строки с ID в массив JSON
+    admin_ids_json="[$(echo "$admin_ids_input" | sed 's/,/,/g')]"
+    
+    # Создание конфигурационного файла
+    mkdir -p awg/config
+    cat > awg/config/config.json << EOL
+{
+    "endpoint": "${endpoint}",
+    "wg_config_file": "${wg_config_file}",
+    "docker_container": "${docker_container}",
+    "bot_token": "${bot_token}",
+    "admin_ids": ${admin_ids_json},
+    "yookassa": {
+        "shop_id": "",
+        "secret_key": ""
+    }
+}
+EOL
+
+    echo -e "${GREEN}Основные настройки успешно сохранены${NC}"
+    return 0
+}
+
 install_bot() {
     get_ubuntu_version
     update_and_clean_system
@@ -474,9 +545,14 @@ install_bot() {
     echo -e "${GREEN}Начинаем установку зависимостей...${NC}"
     install_dependencies
     setup_venv
+    setup_script_permissions
+    configure_main_settings
     configure_yookassa
     initialize_bot
     create_service
+    
+    echo -e "\n${GREEN}Установка успешно завершена!${NC}"
+    echo -e "${YELLOW}Для управления ботом используйте команду: sudo systemctl {start|stop|restart|status} $SERVICE_NAME${NC}"
 }
 
 main() {

@@ -1,34 +1,22 @@
-from . import db
-import aiohttp
+import os
 import logging
 import asyncio
-import aiofiles
-import os
-import re
 import tempfile
-import json
-import subprocess
-import sys
-import pytz
-import zipfile
-import ipaddress
-import humanize
-import shutil
-from aiogram import Bot, types
-from aiogram.dispatcher import Dispatcher, FSMContext
-from aiogram.dispatcher.middlewares import BaseMiddleware
-from aiogram.utils import executor
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
+import pytz
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
-from apscheduler.triggers.interval import IntervalTrigger
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
+
 from .payments import PaymentManager, KeyManager
 from .config.yookassa import YOOKASSA_CONFIG, SUBSCRIPTION_PRICES, SUBSCRIPTION_DAYS
 from .db import (get_config, register_user, get_user, load_payments, 
-                save_payment, update_payment_status, get_user_traffic_limit)
+                save_payment, update_payment_status, get_user_traffic_limit,
+                create_client_with_key)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1254,24 +1242,49 @@ async def process_check_payment(callback_query: types.CallbackQuery):
                 days = SUBSCRIPTION_DAYS[period]
                 break
         
-        # Выпускаем ключ
+        # Создаем нового клиента
         user_id = callback_query.from_user.id
-        key_manager = KeyManager()
-        new_key = await key_manager.issue_new_key(user_id, days)
+        username = f"user_{user_id}"
         
-        if new_key:
+        client_info = await db.create_client_with_key(username, days)
+        if client_info:
+            config_text = client_info['config']
+            expiration_date = datetime.fromisoformat(client_info['expiration_date'])
+            
+            # Сохраняем конфигурацию во временный файл
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp_file:
+                temp_file.write(config_text)
+                config_path = temp_file.name
+            
+            # Отправляем сообщение с информацией
             message = (
                 "✅ Оплата прошла успешно!\n\n"
-                f"🔑 Ваш ключ доступа: `{new_key}`\n"
-                f"📅 Срок действия: {days} дней\n\n"
-                "Сохраните этот ключ, он понадобится для подключения."
+                f"📅 Срок действия: до {expiration_date.strftime('%d.%m.%Y')}\n"
+                "📱 Конфигурация для подключения находится в прикрепленном файле\n\n"
+                "🔧 Инструкция по установке:\n"
+                "1. Скачайте и установите приложение WireGuard\n"
+                "2. Откройте приложение и нажмите кнопку '+'\n"
+                "3. Импортируйте скачанный файл конфигурации\n"
+                "4. Включите VPN"
             )
+            
             keyboard = InlineKeyboardMarkup().add(
                 InlineKeyboardButton("◀️ Вернуться в меню", callback_data="return_to_menu")
             )
-            await callback_query.message.edit_text(message, reply_markup=keyboard, parse_mode="Markdown")
+            
+            # Отправляем сообщение и файл конфигурации
+            await callback_query.message.edit_text(message, reply_markup=keyboard)
+            with open(config_path, 'rb') as config_file:
+                await bot.send_document(
+                    callback_query.from_user.id,
+                    config_file,
+                    caption="📄 Файл конфигурации WireGuard"
+                )
+            
+            # Удаляем временный файл
+            os.unlink(config_path)
         else:
-            await callback_query.answer("Ошибка при создании ключа", show_alert=True)
+            await callback_query.answer("Ошибка при создании конфигурации", show_alert=True)
     else:
         await callback_query.answer(f"Статус платежа: {status}. Попробуйте оплатить заново.", show_alert=True)
 
