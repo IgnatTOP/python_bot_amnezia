@@ -268,10 +268,12 @@ validate_yookassa_credentials() {
         return 1
     fi
     
-    # Проверка формата secret_key (должен быть в правильном формате)
-    if ! [[ "$secret_key" =~ ^(test|live)_[A-Za-z0-9_\-]+$ ]]; then
+    # Проверка формата secret_key (поддержка старого и нового формата)
+    if ! [[ "$secret_key" =~ ^(test|live)_[A-Za-z0-9_\-]+$ ]] && ! [[ "$secret_key" =~ ^(TEST|PROD):[0-9]+$ ]]; then
         echo -e "${RED}Ошибка: неверный формат secret_key${NC}"
-        echo -e "${YELLOW}Формат должен быть: test_XXXXX или live_XXXXX${NC}"
+        echo -e "${YELLOW}Поддерживаемые форматы:${NC}"
+        echo -e "1. Новый формат: test_XXXXX или live_XXXXX"
+        echo -e "2. Старый формат: TEST:XXXXX или PROD:XXXXX"
         return 1
     fi
     
@@ -365,35 +367,41 @@ clone_repository() {
 }
 
 setup_venv() {
-    if [[ -d "myenv" ]]; then
-        echo -e "\n${YELLOW}Виртуальное окружение существует${NC}"
-        return 0
+    echo -e "\n${BLUE}Настройка виртуального окружения...${NC}"
+    
+    # Создание виртуального окружения если оно не существует
+    if [ ! -d "venv" ]; then
+        python3 -m venv venv
     fi
     
-    run_with_spinner "Настройка виртуального окружения" "python3.11 -m venv myenv && source myenv/bin/activate && pip install --upgrade pip && pip install -r $(pwd)/requirements.txt && deactivate"
-}
-
-set_permissions() {
-    find . -type f -name "*.sh" -exec chmod +x {} \; 2>chmod_error.log
-    local status=$?
-    [[ $status -ne 0 ]] && { cat chmod_error.log; rm -f chmod_error.log; exit 1; }
-    rm -f chmod_error.log
+    # Активация виртуального окружения
+    source venv/bin/activate
+    
+    # Установка зависимостей в виртуальное окружение
+    pip install --upgrade pip
+    pip install -r requirements.txt
+    
+    # Создание __init__.py файлов для корректной работы импортов
+    touch awg/__init__.py
+    touch awg/config/__init__.py
+    
+    # Деактивация виртуального окружения
+    deactivate
+    
+    echo -e "${GREEN}✓ Виртуальное окружение настроено${NC}"
 }
 
 initialize_bot() {
-    cd awg || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+    echo -e "\n${BLUE}Инициализация бота...${NC}"
     
-    ../myenv/bin/python3.11 bot_manager.py < /dev/tty &
-    local BOT_PID=$!
+    # Активация виртуального окружения
+    source venv/bin/activate
     
-    while [ ! -f "files/setting.ini" ]; do
-        sleep 2
-        kill -0 "$BOT_PID" 2>/dev/null || { echo -e "\n${RED}Бот завершил работу до инициализации${NC}"; exit 1; }
-    done
+    # Запуск бота с правильным PYTHONPATH
+    PYTHONPATH=$(pwd) python3 -m awg.bot_manager
     
-    kill "$BOT_PID"
-    wait "$BOT_PID" 2>/dev/null
-    cd ..
+    # Деактивация виртуального окружения
+    deactivate
 }
 
 create_service() {
@@ -405,7 +413,7 @@ After=network.target
 [Service]
 User=$USER
 WorkingDirectory=$(pwd)/awg
-ExecStart=$(pwd)/myenv/bin/python3.11 bot_manager.py
+ExecStart=$(pwd)/venv/bin/python3 -m awg.bot_manager
 Restart=always
 
 [Install]
@@ -432,7 +440,6 @@ install_bot() {
     install_and_configure_needrestart
     clone_repository
     setup_venv
-    set_permissions
     initialize_bot
     create_service
 }
