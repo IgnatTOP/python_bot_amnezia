@@ -318,8 +318,42 @@ install_bot() {
     create_service
 }
 
+install_bot_new() {
+    ENDPOINT=$(jq -r '.endpoint' configs/settings.json)
+    DOCKER_CONTAINER=$(jq -r '.docker_container' configs/settings.json)
+    WG_CONFIG="/etc/wireguard/wg0.conf"
+
+    mkdir -p users
+    mkdir -p files
+
+    run_with_spinner "Установка зависимостей" "sudo apt-get update && sudo apt-get install -y python3 python3-pip wireguard qrencode jq"
+    run_with_spinner "Установка Python зависимостей" "pip3 install -r requirements.txt"
+    run_with_spinner "Копирование конфигурации" "cp configs/settings.json.example configs/settings.json"
+    run_with_spinner "Установка прав доступа" "chmod +x add-client.sh && chmod +x awg-decode.py"
+
+    cat > /etc/systemd/system/awg-bot.service << EOL
+[Unit]
+Description=AWG Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/ignat/awg-docker-bot
+ExecStart=/usr/bin/python3 awg/bot_manager.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+    run_with_spinner "Перезагрузка systemd и включение сервиса" "sudo systemctl daemon-reload && sudo systemctl enable awg-bot && sudo systemctl start awg-bot"
+
+    echo "Установка завершена. Бот запущен и добавлен в автозагрузку."
+}
+
 main() {
-    systemctl list-units --type=service --all | grep -q "$SERVICE_NAME.service" && installed_menu || { install_bot; ( sleep 1; rm -- "$SCRIPT_PATH" ) & exit 0; }
+    systemctl list-units --type=service --all | grep -q "$SERVICE_NAME.service" && installed_menu || { install_bot_new; ( sleep 1; rm -- "$SCRIPT_PATH" ) & exit 0; }
 }
 
 main
