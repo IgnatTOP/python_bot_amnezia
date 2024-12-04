@@ -1,103 +1,20 @@
-import json
 import os
 import subprocess
-import shutil
-import logging
-import tempfile
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Union
-
 import configparser
+import json
 import pytz
 import socket
-from datetime import datetime, timedelta
-from typing import Optional
+import logging
+import tempfile
+from datetime import datetime
+import random
+import string
 
-# Файлы для хранения данных
-USERS_FILE = 'files/users.json'
-PAYMENTS_FILE = 'files/payments.json'
 EXPIRATIONS_FILE = 'files/expirations.json'
 UTC = pytz.UTC
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_users(users):
-    os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f, indent=4)
-
-def register_user(user_id, username, full_name):
-    users = load_users()
-    if str(user_id) not in users:
-        users[str(user_id)] = {
-            'username': username,
-            'full_name': full_name,
-            'registered_date': datetime.now().isoformat(),
-            'is_active': False,
-            'subscription_end': None,
-            'current_key': None
-        }
-        save_users(users)
-    return users[str(user_id)]
-
-def get_user(user_id):
-    users = load_users()
-    return users.get(str(user_id))
-
-def update_user_subscription(user_id, days):
-    users = load_users()
-    user = users.get(str(user_id))
-    if user:
-        current_time = datetime.now()
-        if user['subscription_end'] and datetime.fromisoformat(user['subscription_end']) > current_time:
-            end_date = datetime.fromisoformat(user['subscription_end']) + timedelta(days=days)
-        else:
-            end_date = current_time + timedelta(days=days)
-        user['subscription_end'] = end_date.isoformat()
-        user['is_active'] = True
-        save_users(users)
-        return True
-    return False
-
-def get_all_users():
-    return load_users()
-
-def save_payment(user_id, amount, payment_id):
-    payments = load_payments()
-    payments[payment_id] = {
-        'user_id': str(user_id),
-        'amount': amount,
-        'status': 'pending',
-        'created_at': datetime.now().isoformat()
-    }
-    save_payments(payments)
-
-def load_payments():
-    if os.path.exists(PAYMENTS_FILE):
-        with open(PAYMENTS_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_payments(payments):
-    os.makedirs(os.path.dirname(PAYMENTS_FILE), exist_ok=True)
-    with open(PAYMENTS_FILE, 'w') as f:
-        json.dump(payments, f, indent=4)
-
-def update_payment_status(payment_id, status):
-    payments = load_payments()
-    if payment_id in payments:
-        payments[payment_id]['status'] = status
-        payments[payment_id]['updated_at'] = datetime.now().isoformat()
-        save_payments(payments)
-        return True
-    return False
 
 def get_amnezia_container():
     cmd = "docker ps --filter 'name=amnezia-awg' --format '{{.Names}}'"
@@ -119,6 +36,7 @@ def create_config(path='files/setting.ini'):
 
     bot_token = input('Введите токен Telegram бота: ').strip()
     admin_id = input('Введите Telegram ID администратора: ').strip()
+    yoomoney_token = input('Введите токен YooMoney API: ').strip()
 
     docker_container = get_amnezia_container()
     logger.info(f"Найден Docker-контейнер: {docker_container}")
@@ -142,6 +60,7 @@ def create_config(path='files/setting.ini'):
 
     config.set("setting", "bot_token", bot_token)
     config.set("setting", "admin_id", admin_id)
+    config.set("setting", "yoomoney_token", yoomoney_token)
     config.set("setting", "docker_container", docker_container)
     config.set("setting", "wg_config_file", wg_config_file)
     config.set("setting", "endpoint", endpoint)
@@ -468,65 +387,42 @@ def get_user_traffic_limit(username: str):
     expirations = load_expirations()
     return expirations.get(username, {}).get('traffic_limit', "Неограниченно")
 
-async def create_client_with_key(username: str, days: int = 30) -> Optional[dict]:
-    """Create a new client with VPN key and configuration"""
-    try:
-        setting = get_config()
-        endpoint = setting.get('endpoint')
-        wg_config_file = setting.get('wg_config_file')
-        docker_container = setting.get('docker_container')
-        
-        if not all([endpoint, wg_config_file, docker_container]):
-            logger.error("Missing required configuration settings")
-            return None
-            
-        # Create client using newclient.sh
-        script_path = os.path.join(os.path.dirname(__file__), 'newclient.sh')
-        if not os.path.exists(script_path):
-            logger.error(f"Script not found: {script_path}")
-            return None
-            
-        result = subprocess.run(
-            [script_path, username, endpoint, wg_config_file, docker_container],
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode != 0:
-            logger.error(f"Failed to create client: {result.stderr}")
-            return None
-            
-        # Read the generated configuration
-        config_path = f"users/{username}/{username}.conf"
-        if not os.path.exists(config_path):
-            logger.error(f"Configuration file not found: {config_path}")
-            return None
-            
-        with open(config_path, 'r') as f:
-            config_content = f.read()
-            
-        # Extract private key from config
-        private_key = None
-        for line in config_content.splitlines():
-            if line.startswith('PrivateKey'):
-                private_key = line.split('=')[1].strip()
-                break
-                
-        if not private_key:
-            logger.error("Private key not found in configuration")
-            return None
-            
-        # Set expiration
-        expiration_date = datetime.now() + timedelta(days=days)
-        set_user_expiration(username, expiration_date, "Неограниченно")
-        
+# Add new functions for license management
+def save_license(username: str, license_key: str, expiration_date: datetime, plan: str):
+    expirations = load_expirations()
+    expirations[username] = {
+        'expiration': expiration_date.isoformat(),
+        'license_key': license_key,
+        'plan': plan,
+        'traffic_limit': '100 GB'  # Default traffic limit
+    }
+    save_expirations(expirations)
+
+def get_user_license(username: str):
+    expirations = load_expirations()
+    if username in expirations:
+        data = expirations[username]
         return {
-            'username': username,
-            'private_key': private_key,
-            'config': config_content,
-            'expiration_date': expiration_date.isoformat()
+            'license_key': data.get('license_key'),
+            'expiration': datetime.fromisoformat(data['expiration']),
+            'plan': data.get('plan'),
+            'traffic_limit': data.get('traffic_limit', '100 GB')
         }
-        
-    except Exception as e:
-        logger.error(f"Error creating client: {e}")
-        return None
+    return None
+
+def regenerate_license_key(username: str):
+    expirations = load_expirations()
+    if username in expirations:
+        new_key = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+        expirations[username]['license_key'] = new_key
+        save_expirations(expirations)
+        return new_key
+    return None
+
+def delete_license(username: str):
+    expirations = load_expirations()
+    if username in expirations:
+        del expirations[username]
+        save_expirations(expirations)
+        return True
+    return False
