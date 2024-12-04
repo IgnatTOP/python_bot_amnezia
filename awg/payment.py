@@ -55,9 +55,10 @@ class PaymentManager:
                 "capture": True,
                 "confirmation": {
                     "type": "redirect",
-                    "return_url": f"https://t.me/your_bot_username"  # Replace with actual bot username
+                    "return_url": "https://yookassa.ru/"
                 },
                 "description": f"VPN License {plan}",
+                "merchant_customer_id": str(user_id),
                 "metadata": {
                     "payment_id": payment_id,
                     "user_id": user_id,
@@ -66,7 +67,7 @@ class PaymentManager:
             }
 
             headers = {
-                "Authorization": f"Bearer {self.token}",
+                "Authorization": f"Basic {self.token}",
                 "Idempotence-Key": payment_id,
                 "Content-Type": "application/json"
             }
@@ -78,9 +79,16 @@ class PaymentManager:
                 headers=headers
             )
 
+            response_data = response.json()
+            
             if response.status_code == 200:
-                payment_data = response.json()
-                confirmation_url = payment_data["confirmation"]["confirmation_url"]
+                payment_data = response_data
+                confirmation_url = payment_data.get("confirmation", {}).get("confirmation_url")
+                
+                if not confirmation_url:
+                    error_msg = "No confirmation URL in response"
+                    logger.error(f"{error_msg}: {response_data}")
+                    raise Exception(error_msg)
                 
                 self.payments[payment_id] = {
                     "user_id": user_id,
@@ -96,9 +104,16 @@ class PaymentManager:
                 logger.info(f"Payment created successfully: {payment_id}")
                 return payment_id, confirmation_url
             else:
-                error_msg = f"Payment creation failed with status {response.status_code}: {response.text}"
+                error_msg = f"Payment creation failed with status {response.status_code}"
+                if "description" in response_data:
+                    error_msg += f": {response_data['description']}"
+                elif "message" in response_data:
+                    error_msg += f": {response_data['message']}"
+                else:
+                    error_msg += f": {response.text}"
                 logger.error(error_msg)
                 raise Exception(error_msg)
+                
         except requests.exceptions.RequestException as e:
             error_msg = f"Network error during payment creation: {str(e)}"
             logger.error(error_msg)
@@ -110,31 +125,52 @@ class PaymentManager:
 
     def check_payment(self, payment_id: str) -> bool:
         if payment_id not in self.payments:
+            logger.error(f"Payment {payment_id} not found in local storage")
             return False
 
         payment_data = self.payments[payment_id]
         yookassa_payment_id = payment_data.get("payment_id")
 
         if not yookassa_payment_id:
+            logger.error(f"YooKassa payment ID not found for payment {payment_id}")
             return False
 
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
-        }
+        try:
+            headers = {
+                "Authorization": f"Basic {self.token}",
+                "Content-Type": "application/json"
+            }
 
-        response = requests.get(
-            f"https://api.yookassa.ru/v3/payments/{yookassa_payment_id}",
-            headers=headers
-        )
+            logger.info(f"Checking payment status for {payment_id} (YooKassa ID: {yookassa_payment_id})")
+            response = requests.get(
+                f"https://api.yookassa.ru/v3/payments/{yookassa_payment_id}",
+                headers=headers
+            )
 
-        if response.status_code == 200:
-            payment_info = response.json()
-            if payment_info["status"] == "succeeded":
-                self.payments[payment_id]["status"] = "completed"
-                self.payments[payment_id]["completed_at"] = datetime.now().isoformat()
-                self._save_payments()
-                return True
+            if response.status_code == 200:
+                payment_info = response.json()
+                status = payment_info.get("status")
+                logger.info(f"Payment {payment_id} status: {status}")
+                
+                if status == "succeeded":
+                    self.payments[payment_id]["status"] = "completed"
+                    self.payments[payment_id]["completed_at"] = datetime.now().isoformat()
+                    self._save_payments()
+                    return True
+                elif status in ["canceled", "expired"]:
+                    logger.warning(f"Payment {payment_id} is {status}")
+                    self.payments[payment_id]["status"] = status
+                    self._save_payments()
+            else:
+                response_data = response.json()
+                error_msg = f"Failed to check payment status. Status code: {response.status_code}"
+                if "description" in response_data:
+                    error_msg += f", Error: {response_data['description']}"
+                logger.error(error_msg)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error while checking payment {payment_id}: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error while checking payment {payment_id}: {str(e)}")
         
         return False
 
