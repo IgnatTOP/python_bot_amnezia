@@ -37,6 +37,8 @@ def create_config(path='files/setting.ini'):
     bot_token = input('Введите токен Telegram бота: ').strip()
     admin_id = input('Введите Telegram ID администратора: ').strip()
     yoomoney_token = input('Введите токен YooMoney API: ').strip()
+    yoomoney_shop_id = input('Введите идентификатор магазина YooMoney: ').strip()
+    yoomoney_secret_key = input('Введите секретный ключ YooMoney: ').strip()
 
     docker_container = get_amnezia_container()
     logger.info(f"Найден Docker-контейнер: {docker_container}")
@@ -61,6 +63,8 @@ def create_config(path='files/setting.ini'):
     config.set("setting", "bot_token", bot_token)
     config.set("setting", "admin_id", admin_id)
     config.set("setting", "yoomoney_token", yoomoney_token)
+    config.set("setting", "yoomoney_shop_id", yoomoney_shop_id)
+    config.set("setting", "yoomoney_secret_key", yoomoney_secret_key)
     config.set("setting", "docker_container", docker_container)
     config.set("setting", "wg_config_file", wg_config_file)
     config.set("setting", "endpoint", endpoint)

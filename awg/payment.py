@@ -1,8 +1,11 @@
 import uuid
 import json
 import logging
+import hashlib
+import hmac
 from datetime import datetime
-from yoomoney import Client, Quickpay
+from yoomoney import Client
+import requests
 from typing import Optional, Dict, List
 
 logging.basicConfig(level=logging.INFO)
@@ -17,8 +20,10 @@ LICENSE_PRICES = {
 }
 
 class PaymentManager:
-    def __init__(self, token: str):
-        self.client = Client(token)
+    def __init__(self, token: str, shop_id: str, secret_key: str):
+        self.token = token
+        self.shop_id = shop_id
+        self.secret_key = secret_key
         self._load_payments()
 
     def _load_payments(self):
@@ -39,42 +44,100 @@ class PaymentManager:
 
         payment_id = str(uuid.uuid4())
         amount = LICENSE_PRICES[plan]
-        
-        quickpay = Quickpay(
-            receiver="YOUR_YOOMONEY_WALLET",
-            quickpay_form="shop",
-            targets=f"VPN License {plan}",
-            paymentType="SB",
-            sum=amount,
-            label=payment_id
+
+        # Create payment using YooMoney API
+        payload = {
+            "amount": {
+                "value": str(amount),
+                "currency": "RUB"
+            },
+            "capture": True,
+            "confirmation": {
+                "type": "redirect",
+                "return_url": f"https://t.me/your_bot_username"  # Replace with your bot's username
+            },
+            "description": f"VPN License {plan}",
+            "metadata": {
+                "payment_id": payment_id,
+                "user_id": user_id,
+                "plan": plan
+            }
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Idempotence-Key": payment_id,
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(
+            f"https://api.yookassa.ru/v3/payments",
+            json=payload,
+            headers=headers
         )
 
-        self.payments[payment_id] = {
-            "user_id": user_id,
-            "plan": plan,
-            "amount": amount,
-            "status": "pending",
-            "created_at": datetime.now().isoformat(),
-            "completed_at": None
-        }
-        self._save_payments()
-        
-        return payment_id, quickpay.redirected_url
+        if response.status_code == 200:
+            payment_data = response.json()
+            confirmation_url = payment_data["confirmation"]["confirmation_url"]
+            
+            self.payments[payment_id] = {
+                "user_id": user_id,
+                "plan": plan,
+                "amount": amount,
+                "status": "pending",
+                "payment_id": payment_data["id"],
+                "created_at": datetime.now().isoformat(),
+                "completed_at": None
+            }
+            self._save_payments()
+            
+            return payment_id, confirmation_url
+        else:
+            logger.error(f"Failed to create payment: {response.text}")
+            raise Exception("Failed to create payment")
 
     def check_payment(self, payment_id: str) -> bool:
         if payment_id not in self.payments:
             return False
 
-        history = self.client.operation_history(label=payment_id)
-        
-        for operation in history.operations:
-            if operation.status == "success":
+        payment_data = self.payments[payment_id]
+        yookassa_payment_id = payment_data.get("payment_id")
+
+        if not yookassa_payment_id:
+            return False
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.get(
+            f"https://api.yookassa.ru/v3/payments/{yookassa_payment_id}",
+            headers=headers
+        )
+
+        if response.status_code == 200:
+            payment_info = response.json()
+            if payment_info["status"] == "succeeded":
                 self.payments[payment_id]["status"] = "completed"
                 self.payments[payment_id]["completed_at"] = datetime.now().isoformat()
                 self._save_payments()
                 return True
         
         return False
+
+    def verify_notification(self, headers: dict, body: str) -> bool:
+        received_signature = headers.get("Content-Signature")
+        if not received_signature:
+            return False
+
+        hmac_signature = hmac.new(
+            self.secret_key.encode(),
+            body.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        return hmac.compare_digest(received_signature, hmac_signature)
 
     def get_user_payments(self, user_id: int) -> List[Dict]:
         return [

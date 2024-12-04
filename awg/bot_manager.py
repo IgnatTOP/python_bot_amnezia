@@ -37,8 +37,10 @@ wg_config_file = setting.get('wg_config_file')
 docker_container = setting.get('docker_container')
 endpoint = setting.get('endpoint')
 yoomoney_token = setting.get('yoomoney_token')
+yoomoney_shop_id = setting.get('yoomoney_shop_id')
+yoomoney_secret_key = setting.get('yoomoney_secret_key')
 
-if not all([bot_token, admin_id, wg_config_file, docker_container, endpoint, yoomoney_token]):
+if not all([bot_token, admin_id, wg_config_file, docker_container, endpoint, yoomoney_token, yoomoney_shop_id, yoomoney_secret_key]):
     logger.error("Некоторые обязательные настройки отсутствуют в конфигурационном файле.")
     sys.exit(1)
 
@@ -48,7 +50,12 @@ WG_CONFIG_FILE = wg_config_file
 DOCKER_CONTAINER = docker_container
 ENDPOINT = endpoint
 
-payment_manager = PaymentManager(yoomoney_token)
+# Initialize payment manager with all required parameters
+payment_manager = PaymentManager(
+    token=setting.get('yoomoney_token'),
+    shop_id=setting.get('yoomoney_shop_id'),
+    secret_key=setting.get('yoomoney_secret_key')
+)
 
 class AdminMessageDeletionMiddleware(BaseMiddleware):
     async def on_process_message(self, message: types.Message, data: dict):
@@ -211,46 +218,35 @@ async def help_command_handler(message: types.Message):
         except:
             pass
     else:
-        await message.answer("У вас нет доступа к этому боту.")
+        sent_message = await message.answer(
+            "Добро пожаловать! Для использования VPN сервиса необходимо приобрести лицензию.",
+            reply_markup=user_menu_markup
+        )
 
 @dp.message_handler()
 async def handle_messages(message: types.Message):
-    if message.chat.id != admin:
-        await message.answer("У вас нет доступа к этому боту.")
-        return
-    user_state = user_main_messages.get(admin, {}).get('state')
-    if user_state == 'waiting_for_user_name':
-        user_name = message.text.strip()
-        if not all(c.isalnum() or c in "-_" for c in user_name):
-            await message.reply("Имя пользователя может содержать только буквы, цифры, дефисы и подчёркивания.")
-            asyncio.create_task(delete_message_after_delay(sent_message.chat.id, sent_message.message_id, delay=2))
-            return
-        user_main_messages[admin]['client_name'] = user_name
-        user_main_messages[admin]['state'] = 'waiting_for_duration'
-        duration_buttons = [
-            InlineKeyboardButton("1 час", callback_data=f"duration_1h_{user_name}_noipv6"),
-            InlineKeyboardButton("1 день", callback_data=f"duration_1d_{user_name}_noipv6"),
-            InlineKeyboardButton("1 неделя", callback_data=f"duration_1w_{user_name}_noipv6"),
-            InlineKeyboardButton("1 месяц", callback_data=f"duration_1m_{user_name}_noipv6"),
-            InlineKeyboardButton("Без ограничений", callback_data=f"duration_unlimited_{user_name}_noipv6"),
-            InlineKeyboardButton("Домой", callback_data="home")
-        ]
-        duration_markup = InlineKeyboardMarkup(row_width=1).add(*duration_buttons)
-        main_chat_id = user_main_messages[admin].get('chat_id')
-        main_message_id = user_main_messages[admin].get('message_id')
-        if main_chat_id and main_message_id:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text=f"Выберите время действия конфигурации для пользователя **{user_name}**:",
-                parse_mode="Markdown",
-                reply_markup=duration_markup
-            )
-        else:
-            await message.answer("Ошибка: главное сообщение не найдено.")
+    if message.chat.id == admin:
+        user_state = user_main_messages.get(admin, {}).get('state')
+        if user_state == 'waiting_for_user_name':
+            user_name = message.text.strip()
+            if not all(c.isalnum() or c in "-_" for c in user_name):
+                await message.reply("Имя пользователя может содержать только буквы, цифры, дефисы и подчёркивания.")
+                return
+            user_main_messages[admin]['client_name'] = user_name
+            user_main_messages[admin]['state'] = 'waiting_for_duration'
+            duration_buttons = [
+                InlineKeyboardButton("1 час", callback_data=f"duration_1h_{user_name}_noipv6"),
+                InlineKeyboardButton("1 день", callback_data=f"duration_1d_{user_name}_noipv6"),
+                InlineKeyboardButton("1 неделя", callback_data=f"duration_1w_{user_name}_noipv6"),
+                InlineKeyboardButton("1 месяц", callback_data=f"duration_1m_{user_name}_noipv6"),
+                InlineKeyboardButton("Без ограничений", callback_data=f"duration_unlimited_{user_name}_noipv6"),
+                InlineKeyboardButton("Домой", callback_data="home")
+            ]
+            duration_markup = InlineKeyboardMarkup(row_width=1).add(*duration_buttons)
+            await message.answer("Выберите длительность:", reply_markup=duration_markup)
     else:
-        await message.reply("Неизвестная команда или действие.")
-        asyncio.create_task(delete_message_after_delay(sent_message.chat.id, sent_message.message_id, delay=2))
+        # Handle regular user messages if needed
+        pass
 
 @dp.callback_query_handler(lambda c: c.data.startswith('add_user'))
 async def prompt_for_user_name(callback_query: types.CallbackQuery):
@@ -1122,34 +1118,64 @@ async def on_shutdown(dp):
     scheduler.shutdown()
     logger.info("Планировщик остановлен.")
 
+async def handle_user_vpn_access(user_id: int, username: str):
+    """Handle VPN access for users based on their license status"""
+    license_data = db.get_user_license(username)
+    if not license_data:
+        return False, "No active license found. Please purchase a license first."
+    
+    if datetime.now(pytz.UTC) > license_data['expiration']:
+        return False, "Your license has expired. Please purchase a new license."
+    
+    return True, None
+
 @dp.callback_query_handler(lambda c: c.data == 'buy_license')
 async def buy_license_callback(callback_query: types.CallbackQuery):
     markup = InlineKeyboardMarkup(row_width=2)
     for plan, price in LICENSE_PRICES.items():
-        button_text = f"{plan.replace('_', ' ')} - {price} RUB"
+        readable_plan = plan.replace('_', ' ').title()
+        button_text = f"{readable_plan} - {price}₽"
         markup.add(InlineKeyboardButton(button_text, callback_data=f"select_plan_{plan}"))
-    markup.add(InlineKeyboardButton("Back", callback_data="return_home"))
+    markup.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
     
     await callback_query.message.edit_text(
-        "Choose your license plan:",
+        "Выберите тарифный план:\n\n"
+        "🔹 1 месяц - Базовый доступ\n"
+        "🔹 3 месяца - Скидка 20%\n"
+        "🔹 6 месяцев - Скидка 33%\n"
+        "🔹 12 месяцев - Скидка 42%\n\n"
+        "Все тарифы включают:\n"
+        "✓ Безлимитный трафик\n"
+        "✓ Высокая скорость\n"
+        "✓ Поддержка 24/7",
         reply_markup=markup
     )
 
 @dp.callback_query_handler(lambda c: c.data.startswith('select_plan_'))
 async def select_plan_callback(callback_query: types.CallbackQuery):
     plan = callback_query.data.replace('select_plan_', '')
-    payment_id, payment_url = payment_manager.create_payment(callback_query.from_user.id, plan)
-    
-    markup = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("Pay Now", url=payment_url),
-        InlineKeyboardButton("Check Payment", callback_data=f"check_payment_{payment_id}")
-    )
-    
-    await callback_query.message.edit_text(
-        f"Click the button below to proceed with payment.\n"
-        f"After payment, click 'Check Payment' to activate your license.",
-        reply_markup=markup
-    )
+    try:
+        payment_id, payment_url = payment_manager.create_payment(callback_query.from_user.id, plan)
+        
+        markup = InlineKeyboardMarkup().add(
+            InlineKeyboardButton("💳 Оплатить", url=payment_url),
+            InlineKeyboardButton("✓ Проверить оплату", callback_data=f"check_payment_{payment_id}")
+        ).add(
+            InlineKeyboardButton("« Назад", callback_data="buy_license")
+        )
+        
+        await callback_query.message.edit_text(
+            "🔒 Для активации доступа к VPN выполните следующие шаги:\n\n"
+            "1. Нажмите кнопку «Оплатить»\n"
+            "2. Выполните оплату\n"
+            "3. Вернитесь в бот\n"
+            "4. Нажмите «Проверить оплату»\n\n"
+            "После успешной оплаты вы получите данные для подключения.",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Payment creation error: {e}")
+        await callback_query.answer("Произошла ошибка при создании платежа. Попробуйте позже.")
 
 @dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
 async def check_payment_callback(callback_query: types.CallbackQuery):
@@ -1157,78 +1183,99 @@ async def check_payment_callback(callback_query: types.CallbackQuery):
     if payment_manager.check_payment(payment_id):
         payment_data = payment_manager.payments[payment_id]
         plan = payment_data['plan']
+        user_id = callback_query.from_user.id
+        username = f"user_{user_id}"
         
-        # Generate license key and save
-        license_key = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
-        expiration_date = datetime.now(pytz.UTC) + {
-            '1_month': timedelta(days=30),
-            '3_months': timedelta(days=90),
-            '6_months': timedelta(days=180),
-            '12_months': timedelta(days=365)
-        }[plan]
-        
-        username = f"user_{callback_query.from_user.id}"
-        db.save_license(username, license_key, expiration_date, plan)
-        
-        await callback_query.message.edit_text(
-            f"Payment successful! Your license has been activated.\n"
-            f"License Key: {license_key}\n"
-            f"Expiration Date: {expiration_date.strftime('%Y-%m-%d')}\n"
-            f"Plan: {plan}",
-            reply_markup=user_menu_markup
-        )
+        try:
+            # Generate VPN configuration
+            vpn_config = await generate_vpn_config(username)
+            license_key = vpn_config['license_key']
+            expiration_date = datetime.now(pytz.UTC) + {
+                '1_month': timedelta(days=30),
+                '3_months': timedelta(days=90),
+                '6_months': timedelta(days=180),
+                '12_months': timedelta(days=365)
+            }[plan]
+            
+            # Save license information
+            db.save_license(username, license_key, expiration_date, plan)
+            
+            # Send configuration to user
+            markup = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("« Главное меню", callback_data="return_home")
+            )
+            
+            config_text = (
+                "✅ Оплата успешно произведена!\n\n"
+                f"🔑 Ваш ключ: `{license_key}`\n"
+                f"📅 Действует до: {expiration_date.strftime('%d.%m.%Y')}\n"
+                f"📋 Тариф: {plan.replace('_', ' ').title()}\n\n"
+                "📱 Инструкция по подключению:\n"
+                "1. Установите приложение WireGuard\n"
+                "2. Отсканируйте QR-код или импортируйте конфигурацию\n"
+                "3. Нажмите 'Подключить'\n\n"
+                "Конфигурационный файл и QR-код прикреплены ниже."
+            )
+            
+            await callback_query.message.edit_text(
+                config_text,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            
+            # Send configuration file and QR code
+            await send_vpn_config(callback_query.message.chat.id, vpn_config)
+            
+        except Exception as e:
+            logger.error(f"Error generating VPN config: {e}")
+            await callback_query.answer("Произошла ошибка при генерации конфигурации. Обратитесь в поддержку.")
     else:
-        await callback_query.answer("Payment not found or pending. Please try again later.")
+        await callback_query.answer("Платеж не найден или еще не обработан. Попробуйте позже.")
 
-@dp.callback_query_handler(lambda c: c.data == 'license_info')
-async def license_info_callback(callback_query: types.CallbackQuery):
-    username = f"user_{callback_query.from_user.id}"
-    license_data = db.get_user_license(username)
+async def generate_vpn_config(username: str) -> dict:
+    """Generate VPN configuration for a user"""
+    # Generate a unique license key
+    license_key = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
     
-    if license_data:
-        await callback_query.message.edit_text(
-            f"License Information:\n"
-            f"Key: {license_data['license_key']}\n"
-            f"Expiration: {license_data['expiration'].strftime('%Y-%m-%d')}\n"
-            f"Plan: {license_data['plan']}\n"
-            f"Traffic Limit: {license_data['traffic_limit']}",
-            reply_markup=user_menu_markup
-        )
-    else:
-        await callback_query.message.edit_text(
-            "You don't have an active license. Please purchase one.",
-            reply_markup=user_menu_markup
-        )
-
-@dp.callback_query_handler(lambda c: c.data == 'regenerate_key')
-async def regenerate_key_callback(callback_query: types.CallbackQuery):
-    username = f"user_{callback_query.from_user.id}"
-    new_key = db.regenerate_license_key(username)
+    # Create VPN configuration using existing scripts
+    result = await asyncio.create_subprocess_shell(
+        f'./newclient.sh {username}',
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await result.communicate()
     
-    if new_key:
-        await callback_query.message.edit_text(
-            f"Your license key has been regenerated.\nNew key: {new_key}",
-            reply_markup=user_menu_markup
-        )
-    else:
-        await callback_query.message.edit_text(
-            "You don't have an active license to regenerate.",
-            reply_markup=user_menu_markup
-        )
+    if result.returncode != 0:
+        logger.error(f"Error generating VPN config: {stderr.decode()}")
+        raise Exception("Failed to generate VPN configuration")
+    
+    return {
+        'license_key': license_key,
+        'config_path': f'/etc/wireguard/clients/{username}.conf',
+        'qr_path': f'/etc/wireguard/clients/{username}_qr.png'
+    }
 
-@dp.callback_query_handler(lambda c: c.data == 'delete_license')
-async def delete_license_callback(callback_query: types.CallbackQuery):
-    username = f"user_{callback_query.from_user.id}"
-    if db.delete_license(username):
-        await callback_query.message.edit_text(
-            "Your license has been deleted.",
-            reply_markup=user_menu_markup
-        )
-    else:
-        await callback_query.message.edit_text(
-            "You don't have an active license to delete.",
-            reply_markup=user_menu_markup
-        )
+async def send_vpn_config(chat_id: int, config_data: dict):
+    """Send VPN configuration file and QR code to user"""
+    try:
+        # Send configuration file
+        with open(config_data['config_path'], 'rb') as config_file:
+            await bot.send_document(
+                chat_id,
+                config_file,
+                caption="📝 Конфигурационный файл WireGuard"
+            )
+        
+        # Send QR code
+        with open(config_data['qr_path'], 'rb') as qr_file:
+            await bot.send_photo(
+                chat_id,
+                qr_file,
+                caption="📱 QR-код для быстрой настройки"
+            )
+    except Exception as e:
+        logger.error(f"Error sending VPN config: {e}")
+        raise Exception("Failed to send VPN configuration")
 
 @dp.callback_query_handler(lambda c: c.data == 'payment_history')
 async def payment_history_callback(callback_query: types.CallbackQuery):
