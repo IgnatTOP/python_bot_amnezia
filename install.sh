@@ -188,48 +188,36 @@ update_and_clean_system() {
 }
 
 check_python() {
-    if command -v python3.11 &>/dev/null; then
-        echo -e "\n${GREEN}Python 3.11 установлен${NC}"
-        return 0
+    if ! command -v python3 &>/dev/null; then
+        echo -e "${RED}Python 3 не установлен${NC}"
+        run_with_spinner "Установка Python 3" "sudo apt-get install python3 -y -qq"
     fi
-    
-    echo -e "\n${RED}Python 3.11 не установлен${NC}"
-    read -p "Установить Python 3.11? (y/n): " install_python
-    
-    if [[ "$install_python" =~ ^[Yy]$ ]]; then
-       if [[ "$UBUNTU_VERSION" == "24.04" ]]; then
-            local max_attempts=30
-            local attempt=1
-            
-            while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-                echo -e "${YELLOW}Ожидание освобождения dpkg lock (попытка $attempt из $max_attempts)${NC}"
-                attempt=$((attempt + 1))
-                if [ $attempt -gt $max_attempts ]; then
-                    echo -e "${RED}Превышено время ожидания освобождения dpkg lock${NC}"
-                    exit 1
-                fi
-                sleep 10
-            done
-        fi
-        
-        run_with_spinner "Установка Python 3.11" "sudo apt-get install software-properties-common -y && sudo add-apt-repository ppa:deadsnakes/ppa -y && sudo apt-get update -qq && sudo apt-get install python3.11 python3.11-venv python3.11-dev -y -qq"
-            
-        if ! command -v python3.11 &>/dev/null; then
-            echo -e "\n${RED}Не удалось установить Python 3.11${NC}"
-            exit 1
-        fi
-    else
-        echo -e "\n${RED}Установка Python 3.11 обязательна${NC}"
+
+    # Проверяем версию Python
+    PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+    if (( $(echo "$PYTHON_VERSION < 3.7" | bc -l) )); then
+        echo -e "${RED}Требуется Python версии 3.7 или выше. Текущая версия: $PYTHON_VERSION${NC}"
         exit 1
     fi
+
+    echo -e "${GREEN}Python $PYTHON_VERSION установлен${NC}"
+
+    # Установка pip если он отсутствует
+    if ! command -v pip3 &>/dev/null; then
+        echo -e "${YELLOW}pip3 не установлен. Устанавливаем...${NC}"
+        run_with_spinner "Установка pip3" "sudo apt-get install python3-pip -y -qq"
+    fi
+
+    # Обновление pip до последней версии
+    run_with_spinner "Обновление pip" "python3 -m pip install --upgrade pip -q"
 }
 
 install_dependencies() {
     # Установка системных зависимостей
-    run_with_spinner "Установка системных зависимостей" "sudo apt-get install qrencode jq net-tools iptables resolvconf git -y -qq"
+    run_with_spinner "Установка системных зависимостей" "sudo apt-get install qrencode jq net-tools iptables resolvconf git bc -y -qq"
     
     # Установка Python зависимостей
-    run_with_spinner "Установка Python зависимостей" "pip install -r requirements.txt"
+    run_with_spinner "Установка Python зависимостей" "python3 -m pip install -r requirements.txt"
     
     # Создание и настройка конфигурационных директорий
     run_with_spinner "Создание конфигурационных директорий" "mkdir -p awg/config files"
