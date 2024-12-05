@@ -67,23 +67,19 @@ scheduler.start()
 dp.middleware.setup(AdminMessageDeletionMiddleware())
 
 def get_main_menu_markup(user_id):
-    markup = InlineKeyboardMarkup(row_width=1)
+    keyboard = InlineKeyboardMarkup(row_width=1)
     if user_id == admin:
-        markup.add(
-            InlineKeyboardButton("Добавить пользователя", callback_data="add_user"),
-            InlineKeyboardButton("Получить конфигурацию пользователя", callback_data="get_config"),
-            InlineKeyboardButton("Список клиентов", callback_data="list_users"),
-            InlineKeyboardButton("Создать бекап", callback_data="create_backup"),
-            InlineKeyboardButton("История платежей", callback_data="payment_history"),
-            InlineKeyboardButton("Отправить сообщение всем", callback_data="mass_message")
+        keyboard.add(
+            InlineKeyboardButton("Админ-панель", callback_data="admin_panel"),
+            InlineKeyboardButton("Мой VPN", callback_data="my_vpn"),
+            InlineKeyboardButton("Купить VPN", callback_data="buy_vpn")
         )
     else:
-        markup.add(
-            InlineKeyboardButton("Купить VPN", callback_data="buy_vpn"),
-            InlineKeyboardButton("Мой VPN ключ", callback_data="my_vpn_key"),
-            InlineKeyboardButton("Помощь", callback_data="help")
+        keyboard.add(
+            InlineKeyboardButton("Мой VPN", callback_data="my_vpn"),
+            InlineKeyboardButton("Купить VPN", callback_data="buy_vpn")
         )
-    return markup
+    return keyboard
 
 user_main_messages = {}
 isp_cache = {}
@@ -161,54 +157,176 @@ async def load_isp_cache_task():
     await load_isp_cache()
     scheduler.add_job(cleanup_isp_cache, 'interval', hours=1)
 
-def create_zip(backup_filepath):
-    with zipfile.ZipFile(backup_filepath, 'w') as zipf:
-        for main_file in ['awg-decode.py', 'newclient.sh', 'removeclient.sh']:
-            if os.path.exists(main_file):
-                zipf.write(main_file, main_file)
-        for root, dirs, files in os.walk('files'):
-            for file in files:
-                filepath = os.path.join(root, file)
-                arcname = os.path.relpath(filepath, os.getcwd())
-                zipf.write(filepath, arcname)
-        for root, dirs, files in os.walk('users'):
-            for file in files:
-                filepath = os.path.join(root, file)
-                arcname = os.path.relpath(filepath, os.getcwd())
-                zipf.write(filepath, arcname)
+@dp.callback_query_handler(lambda c: c.data == "admin_panel")
+async def admin_panel(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен", show_alert=True)
+        return
+        
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton("Список пользователей", callback_data="admin_users"),
+        InlineKeyboardButton("Создать пользователя", callback_data="admin_create_user"),
+        InlineKeyboardButton("Создать бэкап", callback_data="admin_backup"),
+        InlineKeyboardButton("« Главное меню", callback_data="main_menu")
+    )
+    
+    await callback_query.message.edit_text(
+        "Панель администратора:",
+        reply_markup=keyboard
+    )
 
-async def delete_message_after_delay(chat_id: int, message_id: int, delay: int):
-    await asyncio.sleep(delay)
-    try:
-        await bot.delete_message(chat_id, message_id)
-    except:
-        pass
+@dp.callback_query_handler(lambda c: c.data == "admin_users")
+async def admin_users(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен", show_alert=True)
+        return
+        
+    users = db.get_client_list()
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    
+    if not users:
+        keyboard.add(InlineKeyboardButton("« Назад", callback_data="admin_panel"))
+        await callback_query.message.edit_text(
+            "Список пользователей пуст",
+            reply_markup=keyboard
+        )
+        return
+    
+    for user in users:
+        keyboard.add(InlineKeyboardButton(user[0], callback_data=f"admin_user_{user[0]}"))
+    keyboard.add(InlineKeyboardButton("« Назад", callback_data="admin_panel"))
+    
+    await callback_query.message.edit_text(
+        "Выберите пользователя:",
+        reply_markup=keyboard
+    )
 
-def parse_relative_time(relative_str: str) -> datetime:
+@dp.callback_query_handler(lambda c: c.data.startswith("admin_user_"))
+async def admin_user_actions(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен", show_alert=True)
+        return
+        
+    username = callback_query.data.replace("admin_user_", "")
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton("Получить ключ", callback_data=f"admin_get_key_{username}"),
+        InlineKeyboardButton("Удалить пользователя", callback_data=f"admin_delete_{username}"),
+        InlineKeyboardButton("« К списку", callback_data="admin_users"),
+        InlineKeyboardButton("« Главное меню", callback_data="main_menu")
+    )
+    
+    await callback_query.message.edit_text(
+        f"Действия с пользователем {username}:",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query_handler(lambda c: c.data == "main_menu")
+async def show_main_menu(callback_query: types.CallbackQuery):
+    markup = get_main_menu_markup(callback_query.from_user.id)
+    await callback_query.message.edit_text(
+        "Главное меню:",
+        reply_markup=markup
+    )
+
+@dp.callback_query_handler(lambda c: c.data.startswith("admin_get_key_"))
+async def admin_get_key(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен", show_alert=True)
+        return
+        
+    username = callback_query.data.replace("admin_get_key_", "")
     try:
-        parts = relative_str.lower().replace(' ago', '').split(', ')
-        delta = timedelta()
-        for part in parts:
-            number, unit = part.split(' ')
-            number = int(number)
-            if 'minute' in unit:
-                delta += timedelta(minutes=number)
-            elif 'second' in unit:
-                delta += timedelta(seconds=number)
-            elif 'hour' in unit:
-                delta += timedelta(hours=number)
-            elif 'day' in unit:
-                delta += timedelta(days=number)
-            elif 'week' in unit:
-                delta += timedelta(weeks=number)
-            elif 'month' in unit:
-                delta += timedelta(days=30 * number)
-            elif 'year' in unit:
-                delta += timedelta(days=365 * number)
-        return datetime.now(pytz.UTC) - delta
+        config = db.get_config()
+        result = subprocess.run(
+            ['bash', 'awg/newclient.sh', username, config['endpoint'], config['wg_config'], config['container']],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            keyboard = InlineKeyboardMarkup(row_width=1)
+            keyboard.add(
+                InlineKeyboardButton("« К пользователю", callback_data=f"admin_user_{username}"),
+                InlineKeyboardButton("« К списку", callback_data="admin_users"),
+                InlineKeyboardButton("« Главное меню", callback_data="main_menu")
+            )
+            
+            await callback_query.message.edit_text(
+                f"Ключ для {username}:\n\n{format_vpn_key(result.stdout)}\n\n",
+                reply_markup=keyboard
+            )
+        else:
+            raise Exception(result.stderr)
+            
     except Exception as e:
-        logger.error(f"Ошибка при парсинге относительного времени '{relative_str}': {e}")
-        return None
+        logger.error(f"Error generating key for {username}: {e}")
+        keyboard = InlineKeyboardMarkup(row_width=1)
+        keyboard.add(
+            InlineKeyboardButton("« К пользователю", callback_data=f"admin_user_{username}"),
+            InlineKeyboardButton("« Главное меню", callback_data="main_menu")
+        )
+        await callback_query.message.edit_text(
+            "Ошибка при генерации ключа",
+            reply_markup=keyboard
+        )
+
+@dp.callback_query_handler(lambda c: c.data.startswith("admin_delete_"))
+async def admin_delete_user(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен", show_alert=True)
+        return
+        
+    username = callback_query.data.replace("admin_delete_", "")
+    success = await deactivate_user(username)
+    
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton("« К списку", callback_data="admin_users"),
+        InlineKeyboardButton("« Главное меню", callback_data="main_menu")
+    )
+    
+    text = f"Пользователь {username} {'успешно удален' if success else 'не удален'}"
+    await callback_query.message.edit_text(text, reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data == "my_vpn")
+async def show_my_vpn(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    username = f"user_{user_id}"
+    
+    try:
+        config = db.get_config()
+        result = subprocess.run(
+            ['bash', 'awg/newclient.sh', username, config['endpoint'], config['wg_config'], config['container']],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            keyboard = InlineKeyboardMarkup(row_width=1)
+            keyboard.add(
+                InlineKeyboardButton("« Главное меню", callback_data="main_menu")
+            )
+            
+            await callback_query.message.edit_text(
+                f"Ваш VPN ключ:\n\n{format_vpn_key(result.stdout)}\n\n"
+                "Скопируйте ключ и следуйте инструкции в приложении Amnezia VPN",
+                reply_markup=keyboard
+            )
+        else:
+            raise Exception(result.stderr)
+            
+    except Exception as e:
+        logger.error(f"Error generating key for user {user_id}: {e}")
+        keyboard = InlineKeyboardMarkup(row_width=1)
+        keyboard.add(
+            InlineKeyboardButton("« Главное меню", callback_data="main_menu")
+        )
+        await callback_query.message.edit_text(
+            "Ошибка при получении ключа. Попробуйте позже или обратитесь в поддержку.",
+            reply_markup=keyboard
+        )
 
 @dp.message_handler(commands=['start', 'help'])
 async def help_command_handler(message: types.Message):
