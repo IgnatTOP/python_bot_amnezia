@@ -248,7 +248,7 @@ set_permissions() {
 initialize_bot() {
     run_with_spinner "Initializing bot configuration" "
         cd $SCRIPT_DIR && \
-        source venv/bin/activate && \
+        source myenv/bin/activate && \
         mkdir -p files && \
         python3 -c '
 import sys
@@ -290,8 +290,8 @@ After=network.target
 
 [Service]
 User=$USER
-WorkingDirectory=$(pwd)
-ExecStart=$(pwd)/myenv/bin/python3.11 awg/bot_manager.py
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=$SCRIPT_DIR/myenv/bin/python3.11 awg/bot_manager.py
 Restart=always
 
 [Install]
