@@ -432,180 +432,50 @@ async def set_traffic_limit(callback_query: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith('client_'))
 async def client_selected_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+        
     _, username = callback_query.data.split('client_', 1)
-    username = username.strip()
-    clients = db.get_client_list()
-    client_info = next((c for c in clients if c[0] == username), None)
-    if not client_info:
-        await callback_query.answer("Ошибка: пользователь не найден.", show_alert=True)
-        return
-    expiration_time = db.get_user_expiration(username)
-    traffic_limit = db.get_user_traffic_limit(username)
-    status = "🔴 Офлайн"
-    incoming_traffic = "↓—"
-    outgoing_traffic = "↑—"
-    ipv4_address = "—"
-    total_bytes = 0
-    formatted_total = "0.00B"
-    active_clients = db.get_active_list()
-    active_info = next((ac for ac in active_clients if ac[0] == username), None)
-    if active_info:
-        last_handshake_str = active_info[1]
-        if last_handshake_str.lower() not in ['never', 'нет данных', '-']:
-            try:
-                last_handshake_dt = parse_relative_time(last_handshake_str)
-                if last_handshake_dt:
-                    delta = datetime.now(pytz.UTC) - last_handshake_dt
-                    if delta <= timedelta(minutes=1):
-                        status = "🟢 Онлайн"
-                    else:
-                        status = "❌ Офлайн"
-                    transfer = active_info[2]
-                    incoming_bytes, outgoing_bytes = parse_transfer(transfer)
-                    incoming_traffic = f"↓{humanize_bytes(incoming_bytes)}"
-                    outgoing_traffic = f"↑{humanize_bytes(outgoing_bytes)}"
-                    traffic_data = await update_traffic(username, incoming_bytes, outgoing_bytes)
-                    total_bytes = traffic_data.get('total_incoming', 0) + traffic_data.get('total_outgoing', 0)
-                    formatted_total = humanize_bytes(total_bytes)
-                    if traffic_limit != "Неограниченно":
-                        limit_bytes = parse_traffic_limit(traffic_limit)
-                        if total_bytes >= limit_bytes:
-                            await deactivate_user(username)
-                            await callback_query.answer(f"Пользователь **{username}** превысил лимит трафика и был удален.", show_alert=True)
-                            return
-            except ValueError:
-                logger.error(f"Некорректный формат даты для пользователя {username}: {last_handshake_str}")
-                status = "❌ Офлайн"
-    else:
-        traffic_data = await read_traffic(username)
-        total_bytes = traffic_data.get('total_incoming', 0) + traffic_data.get('total_outgoing', 0)
-        formatted_total = humanize_bytes(total_bytes)
-    allowed_ips = client_info[2]
-    ipv4_match = re.search(r'(\d{1,3}\.){3}\d{1,3}/\d+', allowed_ips)
-    if ipv4_match:
-        ipv4_address = ipv4_match.group(0)
-    else:
-        ipv4_address = "—"
-    if expiration_time:
-        now = datetime.now(pytz.UTC)
-        try:
-            expiration_dt = expiration_time
-            if expiration_dt.tzinfo is None:
-                expiration_dt = expiration_dt.replace(tzinfo=pytz.UTC)
-            remaining = expiration_dt - now
-            if remaining.total_seconds() > 0:
-                days, seconds = remaining.days, remaining.seconds
-                hours = seconds // 3600
-                minutes = (seconds % 3600) // 60
-                date_end = f"📅 {days}д {hours}ч {minutes}м"
-            else:
-                date_end = "📅 ♾️ Неограниченно"
-        except Exception as e:
-            logger.error(f"Ошибка при обработке даты окончания: {e}")
-            date_end = "📅 ♾️ Неограниченно"
-    else:
-        date_end = "📅 ♾️ Неограниченно"
-    if traffic_limit == "Неограниченно":
-        traffic_limit_display = "♾️ Неограниченно"
-    else:
-        traffic_limit_display = traffic_limit
-    text = (
-	f"📧 *Имя:* {username}\n"
-        f"🌐 *IPv4:* {ipv4_address}\n"
-        f"🌐 *Статус соединения:* {status}\n"
-        f"{date_end}\n"
-        f"🔼 *Исходящий трафик:* {incoming_traffic}\n"
-        f"🔽 *Входящий трафик:* {outgoing_traffic}\n"
-        f"📊 *Всего:* ↑↓{formatted_total} из **{traffic_limit_display}**\n"
-    )
-    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
-        InlineKeyboardButton("IP info", callback_data=f"ip_info_{username}"),
-        InlineKeyboardButton("Подключения", callback_data=f"connections_{username}")
+        InlineKeyboardButton("Получить конфигурацию", callback_data=f"get_config_{username}"),
+        InlineKeyboardButton("Удалить пользователя", callback_data=f"delete_{username}"),
+        InlineKeyboardButton("« Назад", callback_data="list_users"),
+        InlineKeyboardButton("« В главное меню", callback_data="return_home")
     )
-    keyboard.add(
-        InlineKeyboardButton("Удалить", callback_data=f"delete_user_{username}")
+    
+    await callback_query.message.edit_text(
+        f"Действия с пользователем {username}:",
+        reply_markup=keyboard
     )
-    keyboard.add(
-        InlineKeyboardButton("Назад", callback_data="list_users"),
-        InlineKeyboardButton("Домой", callback_data="home")
-    )
-    main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
-    main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
-    if main_chat_id and main_message_id:
-        try:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text=text,
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при редактировании сообщения: {e}")
-            await callback_query.answer("Ошибка при обновлении сообщения.", show_alert=True)
-    else:
-        await callback_query.answer("Ошибка: главное сообщение не найдено.", show_alert=True)
-        return
-    await callback_query.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('list_users'))
 async def list_users_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+        
     clients = db.get_client_list()
     if not clients:
-        await callback_query.answer("Список пользователей пуст.", show_alert=True)
+        keyboard = InlineKeyboardMarkup().add(
+            InlineKeyboardButton("« Назад", callback_data="return_home")
+        )
+        await callback_query.message.edit_text(
+            "Список пользователей пуст.",
+            reply_markup=keyboard
+        )
         return
-    active_clients = db.get_active_list()
-    active_clients_dict = {}
-    for client in active_clients:
-        username = client[0]
-        last_handshake = client[1]
-        active_clients_dict[username] = last_handshake
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    now = datetime.now(pytz.UTC)
-    for client in clients:
-        username = client[0]
-        last_handshake_str = active_clients_dict.get(username)
-        if last_handshake_str and last_handshake_str.lower() not in ['never', 'нет данных', '-']:
-            try:
-                last_handshake_dt = parse_relative_time(last_handshake_str)
-                if last_handshake_dt:
-                    delta = now - last_handshake_dt
-                    delta_days = delta.days
-                    if delta_days <= 5:
-                        status_display = f"🟢({delta_days}d) {username}"
-                    else:
-                        status_display = f"❌(?d) {username}"
-                else:
-                    status_display = f"❌(?d) {username}"
-            except ValueError:
-                logger.error(f"Некорректный формат даты для пользователя {username}: {last_handshake_str}")
-                status_display = f"❌(?d) {username}"
-        else:
-            status_display = f"❌(?d) {username}"
-        keyboard.insert(InlineKeyboardButton(status_display, callback_data=f"client_{username}"))
-    keyboard.add(InlineKeyboardButton("Домой", callback_data="home"))
-    main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
-    main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
-    if main_chat_id and main_message_id:
-        try:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text="Выберите пользователя:",
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при редактировании сообщения: {e}")
-            await callback_query.answer("Ошибка при обновлении сообщения.", show_alert=True)
-    else:
-        sent_message = await callback_query.message.reply("Выберите пользователя:", reply_markup=keyboard)
-        user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
-        try:
-            await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
-        except:
-            pass
-    await callback_query.answer()
+        
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    for username in clients:
+        keyboard.add(InlineKeyboardButton(username[0], callback_data=f"client_{username[0]}"))
+    keyboard.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
+    
+    await callback_query.message.edit_text(
+        "Выберите пользователя:",
+        reply_markup=keyboard
+    )
 
 @dp.callback_query_handler(lambda c: c.data.startswith('connections_'))
 async def client_connections_callback(callback_query: types.CallbackQuery):
@@ -1150,14 +1020,74 @@ async def handle_payment(callback_query: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup()
     keyboard.add(
         InlineKeyboardButton("Оплатить", url=payment_url),
+        InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{period}"),
         InlineKeyboardButton("« Назад", callback_data="buy_vpn")
     )
     
     await callback_query.message.edit_text(
-        "Для оплаты нажмите кнопку ниже. После успешной оплаты, "
-        "ваш VPN ключ будет автоматически сгенерирован.",
+        "Для оплаты нажмите кнопку ниже. После оплаты нажмите 'Проверить оплату' "
+        "для получения вашего VPN ключа.",
         reply_markup=keyboard
     )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
+async def check_payment_status(callback_query: types.CallbackQuery):
+    period = callback_query.data.replace('check_payment_', '')
+    user_id = callback_query.from_user.id
+    
+    # Get user's latest payment
+    payments = db.get_user_payments(user_id)
+    if not payments:
+        await callback_query.answer("Платеж не найден", show_alert=True)
+        return
+
+    latest_payment = payments[-1]
+    payment_id = latest_payment['payment_id']
+    
+    try:
+        # Check payment status in YooKassa
+        payment = Payment.find_one(payment_id)
+        
+        if payment.status == 'succeeded':
+            # Update payment status in database
+            db.update_payment_status(payment_id, 'succeeded')
+            
+            # Generate VPN key for user
+            client_name = f"user_{user_id}"
+            try:
+                vpn_key = await generate_vpn_key(client_name)
+                keyboard = InlineKeyboardMarkup()
+                keyboard.add(
+                    InlineKeyboardButton("« В главное меню", callback_data="return_home")
+                )
+                
+                await callback_query.message.edit_text(
+                    f"Оплата успешна! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+                    "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.error(f"Error generating VPN key: {e}")
+                await callback_query.answer(
+                    "Произошла ошибка при генерации ключа. Пожалуйста, обратитесь в поддержку.",
+                    show_alert=True
+                )
+        elif payment.status == 'pending':
+            await callback_query.answer(
+                "Оплата еще не поступила. Пожалуйста, подождите или попробуйте позже.",
+                show_alert=True
+            )
+        else:
+            await callback_query.answer(
+                f"Статус платежа: {payment.status}. Попробуйте оплатить снова.",
+                show_alert=True
+            )
+    except Exception as e:
+        logger.error(f"Error checking payment status: {e}")
+        await callback_query.answer(
+            "Произошла ошибка при проверке платежа. Попробуйте позже.",
+            show_alert=True
+        )
 
 @dp.callback_query_handler(lambda c: c.data == 'my_vpn_key')
 async def my_vpn_key_callback(callback_query: types.CallbackQuery):
