@@ -223,19 +223,19 @@ clone_repository() {
     if [[ -d "python_bot_amnezia" ]]; then
         echo -e "\n${YELLOW}Репозиторий существует${NC}"
         cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
-        return 0
+    else
+        run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git python_bot_amnezia"
+        cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
     fi
-    
-    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git python_bot_amnezia"
-    cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+    SCRIPT_DIR="$(pwd)"
 }
 
 setup_venv() {
-    run_with_spinner "Создание виртуального окружения" "python3 -m venv $SCRIPT_DIR/venv"
-    run_with_spinner "Активация виртуального окружения" "source $SCRIPT_DIR/venv/bin/activate"
-    run_with_spinner "Обновление pip" "$SCRIPT_DIR/venv/bin/pip install --upgrade pip"
-    run_with_spinner "Установка зависимостей" "$SCRIPT_DIR/venv/bin/pip install -r $SCRIPT_DIR/requirements.txt"
-    run_with_spinner "Установка YooKassa" "$SCRIPT_DIR/venv/bin/pip install yookassa"
+    run_with_spinner "Создание виртуального окружения" "python3 -m venv venv"
+    source venv/bin/activate
+    run_with_spinner "Обновление pip" "./venv/bin/pip install --upgrade pip"
+    run_with_spinner "Установка зависимостей" "./venv/bin/pip install -r requirements.txt"
+    run_with_spinner "Установка YooKassa" "./venv/bin/pip install yookassa"
 }
 
 set_permissions() {
