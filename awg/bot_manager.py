@@ -1132,55 +1132,83 @@ async def buy_vpn(callback_query: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith('purchase_'))
 async def process_purchase(callback_query: types.CallbackQuery):
-    period = callback_query.data.split('_')[1]
-    price = PRICES[period]
-    months = int(period.split('_')[0])
-    payment_id = f"pay_{callback_query.from_user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    
-    # Сохраняем информацию о платеже
-    db.add_payment(callback_query.from_user.id, payment_id, price)
-    
-    # Здесь должна быть интеграция с платежной системой
-    # Для примера используем простую имитацию
-    markup = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("Подтвердить оплату", callback_data=f"confirm_payment_{payment_id}_{months}")
-    )
-    
-    await callback_query.message.edit_text(
-        f"К оплате: ${price}\n"
-        f"ID платежа: {payment_id}\n\n"
-        "После оплаты нажмите кнопку подтверждения:",
-        reply_markup=markup
-    )
+    try:
+        # Получаем период из callback_data
+        period = '_'.join(callback_query.data.split('_')[1:])
+        
+        if period not in PRICES:
+            raise KeyError(f"Неверный период: {period}")
+            
+        price = PRICES[period]
+        months = int(period.split('_')[0])
+        payment_id = f"pay_{callback_query.from_user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        # Сохраняем информацию о платеже
+        db.add_payment(callback_query.from_user.id, payment_id, price)
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("Подтвердить оплату", callback_data=f"confirm_payment_{payment_id}_{months}"),
+            InlineKeyboardButton("Отмена", callback_data="buy_vpn")
+        )
+        
+        await callback_query.message.edit_text(
+            f"К оплате: ${price}\n"
+            f"Период: {months} {'месяц' if months == 1 else 'месяцев'}\n"
+            f"ID платежа: {payment_id}\n\n"
+            "После оплаты нажмите кнопку подтверждения:",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в process_purchase: {str(e)}")
+        await callback_query.message.edit_text(
+            "Произошла ошибка при обработке запроса. Попробуйте снова.",
+            reply_markup=InlineKeyboardMarkup().add(
+                InlineKeyboardButton("Назад", callback_data="buy_vpn")
+            )
+        )
 
 @dp.callback_query_handler(lambda c: c.data.startswith('confirm_payment_'))
 async def confirm_payment(callback_query: types.CallbackQuery):
-    _, payment_id, months = callback_query.data.split('_')
-    months = int(months)
-    
-    # Обновляем статус платежа
-    db.update_payment_status(payment_id, 'completed')
-    
-    # Генерируем ключ для пользователя
-    user_id = callback_query.from_user.id
-    client_name = f"user_{user_id}"
-    
-    # Устанавливаем срок действия
-    expiration_date = datetime.now(pytz.UTC) + timedelta(days=30 * months)
-    db.set_user_expiration(client_name, expiration_date, "Неограниченно")
-    
-    # Создаем конфигурацию
-    await root_add(user_id)
-    
-    markup = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("Получить ключ", callback_data="my_key"),
-        InlineKeyboardButton("Главное меню", callback_data="return_user_menu")
-    )
-    
-    await callback_query.message.edit_text(
-        "Оплата подтверждена! Ваш VPN-ключ готов.",
-        reply_markup=markup
-    )
+    try:
+        payment_data = callback_query.data.split('_')
+        if len(payment_data) < 4:
+            raise ValueError("Неверный формат данных платежа")
+            
+        payment_id = payment_data[2]
+        months = int(payment_data[3])
+        
+        # Обновляем статус платежа
+        db.update_payment_status(payment_id, 'completed')
+        
+        # Генерируем ключ для пользователя
+        user_id = callback_query.from_user.id
+        client_name = f"user_{user_id}"
+        
+        # Устанавливаем срок действия
+        expiration_date = datetime.now(pytz.UTC) + timedelta(days=30 * months)
+        db.set_user_expiration(client_name, expiration_date, "Неограниченно")
+        
+        # Создаем конфигурацию
+        await root_add(user_id)
+        
+        markup = InlineKeyboardMarkup().add(
+            InlineKeyboardButton("Получить ключ", callback_data="my_key"),
+            InlineKeyboardButton("Главное меню", callback_data="return_user_menu")
+        )
+        
+        await callback_query.message.edit_text(
+            "Оплата подтверждена! Ваш VPN-ключ готов.",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в confirm_payment: {str(e)}")
+        await callback_query.message.edit_text(
+            "Произошла ошибка при подтверждении платежа. Обратитесь к администратору.",
+            reply_markup=InlineKeyboardMarkup().add(
+                InlineKeyboardButton("Главное меню", callback_data="return_user_menu")
+            )
+        )
 
 @dp.callback_query_handler(lambda c: c.data == 'my_key')
 async def show_user_key(callback_query: types.CallbackQuery):
