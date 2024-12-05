@@ -233,9 +233,9 @@ clone_repository() {
 setup_venv() {
     run_with_spinner "Создание виртуального окружения" "python3 -m venv $SCRIPT_DIR/venv"
     run_with_spinner "Активация виртуального окружения" "source $SCRIPT_DIR/venv/bin/activate"
-    run_with_spinner "Обновление pip" "pip install --upgrade pip"
-    run_with_spinner "Установка зависимостей" "pip install -r $SCRIPT_DIR/requirements.txt"
-    run_with_spinner "Установка YooKassa" "pip install yookassa"
+    run_with_spinner "Обновление pip" "$SCRIPT_DIR/venv/bin/pip install --upgrade pip"
+    run_with_spinner "Установка зависимостей" "$SCRIPT_DIR/venv/bin/pip install -r $SCRIPT_DIR/requirements.txt"
+    run_with_spinner "Установка YooKassa" "$SCRIPT_DIR/venv/bin/pip install yookassa"
 }
 
 set_permissions() {
@@ -290,27 +290,24 @@ EOL
 }
 
 create_service() {
-    cat > /tmp/service_file << EOF
+    cat > /etc/systemd/system/${SERVICE_NAME}.service << EOL
 [Unit]
-Description=AmneziaVPN Docker Telegram Bot
+Description=AWG Bot Service
 After=network.target
 
 [Service]
 User=$USER
-WorkingDirectory=$(pwd)/awg
-ExecStart=$(pwd)/venv/bin/python3.11 bot_manager.py
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=$SCRIPT_DIR/venv/bin/python3 awg/bot_manager.py
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOL
 
-    run_with_spinner "Создание службы" "sudo mv /tmp/service_file /etc/systemd/system/$SERVICE_NAME.service"
-    run_with_spinner "Обновление systemd" "sudo systemctl daemon-reload -qq"
-    run_with_spinner "Запуск службы" "sudo systemctl start $SERVICE_NAME -qq"
-    run_with_spinner "Включение автозапуска" "sudo systemctl enable $SERVICE_NAME -qq"
-    
-    systemctl is-active --quiet "$SERVICE_NAME" && echo -e "\n${GREEN}Служба запущена${NC}" || echo -e "\n${RED}Ошибка запуска службы${NC}"
+    run_with_spinner "Перезагрузка systemd" "systemctl daemon-reload"
+    run_with_spinner "Включение сервиса" "systemctl enable ${SERVICE_NAME}.service"
+    run_with_spinner "Запуск сервиса" "systemctl start ${SERVICE_NAME}.service"
 }
 
 install_bot() {
