@@ -85,6 +85,9 @@ def get_main_menu_markup(user_id):
         )
     return markup
 
+def get_back_button(callback_data="return_home"):
+    return InlineKeyboardButton("« Назад", callback_data=callback_data)
+
 user_main_messages = {}
 isp_cache = {}
 ISP_CACHE_FILE = 'files/isp_cache.json'
@@ -378,16 +381,15 @@ async def set_traffic_limit(callback_query: types.CallbackQuery):
                 caption = f"{instruction_text}\n{key_message}"
             else:
                 caption = "VPN ключ не был сгенерирован."
-            if os.path.exists(conf_path):
-                with open(conf_path, 'rb') as config:
-                    sent_doc = await bot.send_document(
-                        callback_query.from_user.id,
-                        config,
-                        caption=caption,
-                        parse_mode="Markdown",
-                        disable_notification=True
-                    )
-                    asyncio.create_task(delete_message_after_delay(callback_query.from_user.id, sent_doc.message_id, delay=15))
+            with open(conf_path, 'rb') as config:
+                sent_doc = await bot.send_document(
+                    callback_query.from_user.id,
+                    config,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    disable_notification=True
+                )
+                asyncio.create_task(delete_message_after_delay(callback_query.from_user.id, sent_doc.message_id, delay=15))
         except FileNotFoundError:
             confirmation_text = "Не удалось найти файлы конфигурации для указанного пользователя."
             sent_message = await bot.send_message(callback_query.from_user.id, confirmation_text, parse_mode="Markdown", disable_notification=True)
@@ -435,42 +437,90 @@ async def client_selected_callback(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
         return
-
+        
     _, username = callback_query.data.split('client_', 1)
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
         InlineKeyboardButton("Получить конфигурацию", callback_data=f"get_config_{username}"),
         InlineKeyboardButton("Удалить пользователя", callback_data=f"delete_{username}"),
-        InlineKeyboardButton("« Назад", callback_data="list_users"),
-        InlineKeyboardButton("« В главное меню", callback_data="return_home")
+        get_back_button("list_users"),
+        get_back_button("return_home")
     )
-
+    
     await callback_query.message.edit_text(
         f"Действия с пользователем {username}:",
         reply_markup=keyboard
     )
+
+user_navigation_history = {}
+
+def get_navigation_buttons(user_id: int, current_state: str):
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    
+    if user_id in user_navigation_history and user_navigation_history[user_id]:
+        keyboard.add(InlineKeyboardButton(
+            "« Назад",
+            callback_data=f"nav_back_{current_state}"
+        ))
+    
+    keyboard.add(InlineKeyboardButton(
+        "🏠 Главное меню",
+        callback_data="return_home"
+    ))
+    
+    return keyboard
+
+def update_navigation_history(user_id: int, current_state: str):
+    if user_id not in user_navigation_history:
+        user_navigation_history[user_id] = []
+    
+    if not user_navigation_history[user_id] or user_navigation_history[user_id][-1] != current_state:
+        user_navigation_history[user_id].append(current_state)
+    
+    if len(user_navigation_history[user_id]) > 10:
+        user_navigation_history[user_id] = user_navigation_history[user_id][-10:]
+
+@dp.callback_query_handler(lambda c: c.data.startswith('nav_back_'))
+async def handle_navigation_back(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    current_state = callback_query.data.replace('nav_back_', '')
+    
+    if user_id in user_navigation_history and user_navigation_history[user_id]:
+        if user_navigation_history[user_id] and user_navigation_history[user_id][-1] == current_state:
+            user_navigation_history[user_id].pop()
+        
+        if user_navigation_history[user_id]:
+            previous_state = user_navigation_history[user_id][-1]
+            if previous_state == "main_menu":
+                await return_home(callback_query)
+            elif previous_state == "list_users":
+                await list_users_callback(callback_query)
+            elif previous_state == "payment_history":
+                await payment_history_callback(callback_query)
+    
+    await callback_query.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('list_users'))
 async def list_users_callback(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
         return
-
+        
+    update_navigation_history(callback_query.from_user.id, "list_users")
+    
     clients = db.get_client_list()
     if not clients:
         keyboard = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("« Назад", callback_data="return_home")
+            get_back_button()
         )
-        await callback_query.message.edit_text(
-            "Список пользователей пуст.",
-            reply_markup=keyboard
-        )
+        await callback_query.message.edit_text("Список клиентов пуст", reply_markup=keyboard)
         return
-
     keyboard = InlineKeyboardMarkup(row_width=1)
-    for username in clients:
-        keyboard.add(InlineKeyboardButton(username[0], callback_data=f"client_{username[0]}"))
-    keyboard.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
+    for client in clients:
+        keyboard.insert(InlineKeyboardButton(client[0], callback_data=f"client_{client[0]}"))
+    nav_buttons = get_navigation_buttons(callback_query.from_user.id, "list_users")
+    for button in nav_buttons.inline_keyboard:
+        keyboard.add(*button)
 
     await callback_query.message.edit_text(
         "Выберите пользователя:",
@@ -497,8 +547,8 @@ async def client_connections_callback(callback_query: types.CallbackQuery):
             connections_text += f"{ip} ({isp}) - {timestamp}\n"
         keyboard = InlineKeyboardMarkup(row_width=2)
         keyboard.add(
-            InlineKeyboardButton("Назад", callback_data=f"client_{username}"),
-            InlineKeyboardButton("Домой", callback_data="home")
+            get_back_button(f"client_{username}"),
+            get_back_button("home")
         )
         await bot.edit_message_text(
             chat_id=callback_query.message.chat.id,
@@ -547,8 +597,8 @@ async def ip_info_callback(callback_query: types.CallbackQuery):
         info_text += f"{key.capitalize()}: {value}\n"
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
-        InlineKeyboardButton("Назад", callback_data=f"client_{username}"),
-        InlineKeyboardButton("Домой", callback_data="home")
+        get_back_button(f"client_{username}"),
+        get_back_button("home")
     )
     main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
     main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
@@ -615,7 +665,7 @@ async def return_home(callback_query: types.CallbackQuery):
         user_main_messages[callback_query.from_user.id].pop('client_name', None)
         user_main_messages[callback_query.from_user.id].pop('duration_choice', None)
         user_main_messages[callback_query.from_user.id].pop('traffic_limit', None)
-
+        
         try:
             await bot.edit_message_text(
                 chat_id=main_chat_id,
@@ -643,13 +693,15 @@ async def return_home(callback_query: types.CallbackQuery):
 async def list_users_for_config(callback_query: types.CallbackQuery):
     clients = db.get_client_list()
     if not clients:
-        await callback_query.answer("Список пользователей пуст.", show_alert=True)
+        keyboard = InlineKeyboardMarkup().add(
+            get_back_button()
+        )
+        await callback_query.message.edit_text("Список клиентов пуст", reply_markup=keyboard)
         return
-    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard = InlineKeyboardMarkup(row_width=1)
     for client in clients:
-        username = client[0]
-        keyboard.insert(InlineKeyboardButton(username, callback_data=f"send_config_{username}"))
-    keyboard.add(InlineKeyboardButton("Домой", callback_data="home"))
+        keyboard.insert(InlineKeyboardButton(client[0], callback_data=f"send_config_{client[0]}"))
+    keyboard.add(get_back_button())
     main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
     main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
     if main_chat_id and main_message_id:
@@ -731,7 +783,7 @@ async def send_user_config(callback_query: types.CallbackQuery):
         asyncio.create_task(delete_message_after_delay(callback_query.from_user.id, message_id, delay=15))
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('create_backup'))
+@dp.callback_query_handler(lambda c: c.data == 'create_backup')
 async def create_backup_callback(callback_query: types.CallbackQuery):
     date_str = datetime.now().strftime('%Y-%m-%d')
     backup_filename = f"backup_{date_str}.zip"
@@ -993,7 +1045,7 @@ async def create_payment(user_id: int, period: str) -> dict:
             "period": period
         }
     })
-
+    
     db.add_payment(user_id, payment.id, amount)
     return payment.confirmation.confirmation_url
 
@@ -1005,7 +1057,7 @@ async def buy_vpn_callback(callback_query: types.CallbackQuery):
         InlineKeyboardButton("3 месяца - 1200₽", callback_data="pay_3_months"),
         InlineKeyboardButton("6 месяцев - 2000₽", callback_data="pay_6_months"),
         InlineKeyboardButton("12 месяцев - 3500₽", callback_data="pay_12_months"),
-        InlineKeyboardButton("« Назад", callback_data="return_home")
+        get_back_button("return_home")
     )
     await callback_query.message.edit_text(
         "Выберите период подписки:",
@@ -1016,14 +1068,14 @@ async def buy_vpn_callback(callback_query: types.CallbackQuery):
 async def handle_payment(callback_query: types.CallbackQuery):
     period = callback_query.data.replace('pay_', '')
     payment_url = await create_payment(callback_query.from_user.id, period)
-
+    
     keyboard = InlineKeyboardMarkup()
     keyboard.add(
         InlineKeyboardButton("Оплатить", url=payment_url),
         InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{period}"),
-        InlineKeyboardButton("« Назад", callback_data="buy_vpn")
+        get_back_button("buy_vpn")
     )
-
+    
     await callback_query.message.edit_text(
         "Для оплаты нажмите кнопку ниже. После оплаты нажмите 'Проверить оплату' "
         "для получения вашего VPN ключа.",
@@ -1034,7 +1086,7 @@ async def handle_payment(callback_query: types.CallbackQuery):
 async def check_payment_status(callback_query: types.CallbackQuery):
     period = callback_query.data.replace('check_payment_', '')
     user_id = callback_query.from_user.id
-
+    
     # Get user's latest payment
     payments = db.get_user_payments(user_id)
     if not payments:
@@ -1043,24 +1095,24 @@ async def check_payment_status(callback_query: types.CallbackQuery):
 
     latest_payment = payments[-1]
     payment_id = latest_payment['payment_id']
-
+    
     try:
         # Check payment status in YooKassa
         payment = Payment.find_one(payment_id)
-
+        
         if payment.status == 'succeeded':
             # Update payment status in database
             db.update_payment_status(payment_id, 'succeeded')
-
+            
             # Generate VPN key for user
             client_name = f"user_{user_id}"
             try:
                 vpn_key = await generate_vpn_key(client_name)
                 keyboard = InlineKeyboardMarkup()
                 keyboard.add(
-                    InlineKeyboardButton("« В главное меню", callback_data="return_home")
+                    get_back_button("return_home")
                 )
-
+                
                 await callback_query.message.edit_text(
                     f"Оплата успешна! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
                     "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
@@ -1072,7 +1124,6 @@ async def check_payment_status(callback_query: types.CallbackQuery):
                     "Произошла ошибка при генерации ключа. Пожалуйста, обратитесь в поддержку.",
                     show_alert=True
                 )
-                return
         elif payment.status == 'pending':
             await callback_query.answer(
                 "Оплата еще не поступила. Пожалуйста, подождите или попробуйте позже.",
@@ -1095,11 +1146,11 @@ async def my_vpn_key_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     payments = db.get_user_payments(user_id)
     active_payments = [p for p in payments if p['status'] == 'succeeded']
-
+    
     if not active_payments:
         keyboard = InlineKeyboardMarkup()
         keyboard.add(InlineKeyboardButton("Купить VPN", callback_data="buy_vpn"))
-        keyboard.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
+        keyboard.add(get_back_button("return_home"))
         await callback_query.message.edit_text(
             "У вас нет активного VPN ключа. Для получения ключа необходимо приобрести подписку.",
             reply_markup=keyboard
@@ -1116,7 +1167,7 @@ async def my_vpn_key_callback(callback_query: types.CallbackQuery):
         await callback_query.message.edit_text(
             "Произошла ошибка при генерации ключа. Пожалуйста, попробуйте позже или обратитесь в поддержку.",
             reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("« Назад", callback_data="return_home")
+                get_back_button("return_home")
             )
         )
         return
@@ -1125,9 +1176,9 @@ async def my_vpn_key_callback(callback_query: types.CallbackQuery):
     keyboard.add(
         InlineKeyboardButton("Обновить ключ", callback_data="regenerate_key"),
         InlineKeyboardButton("Удалить ключ", callback_data="delete_key"),
-        InlineKeyboardButton("« Назад", callback_data="return_home")
+        get_back_button("return_home")
     )
-
+    
     await callback_query.message.edit_text(
         f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
         "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
@@ -1139,10 +1190,12 @@ async def payment_history_callback(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("Доступ запрещен")
         return
-
+        
+    update_navigation_history(callback_query.from_user.id, "payment_history")
+    
     payments = db.get_all_payments()
     message_text = "История платежей:\n\n"
-
+    
     for user_id, user_payments in payments.items():
         for payment in user_payments:
             timestamp = datetime.fromisoformat(payment['timestamp'])
@@ -1153,11 +1206,9 @@ async def payment_history_callback(callback_query: types.CallbackQuery):
                 f"Статус: {payment['status']}\n"
                 f"Дата: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             )
-
-    keyboard = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("« Назад", callback_data="return_home")
-    )
-
+    
+    keyboard = get_navigation_buttons(callback_query.from_user.id, "payment_history")
+    
     await callback_query.message.edit_text(
         message_text if message_text != "История платежей:\n\n" else "История платежей пуста",
         reply_markup=keyboard
@@ -1168,87 +1219,15 @@ async def mass_message_prompt(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("Доступ запрещен")
         return
-
+        
+    keyboard = InlineKeyboardMarkup().add(
+        get_back_button()
+    )
+    
+    user_main_messages[callback_query.from_user.id]['state'] = 'waiting_for_mass_message'
     await callback_query.message.edit_text(
-        "Отправьте сообщение, которое нужно разослать всем пользователям:",
-        reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton("« Назад", callback_data="return_home")
-        )
+        "Введите сообщение, которое нужно разослать всем пользователям:",
+        reply_markup=keyboard
     )
-
-    # Set state for next message
-    user_states[callback_query.from_user.id] = "waiting_for_mass_message"
-
-async def process_mass_message(message: types.Message):
-    if message.from_user.id != admin:
-        return
-
-    # Get all unique user IDs from payments
-    payments = db.get_all_payments()
-    user_ids = set(int(user_id) for user_id in payments.keys())
-
-    sent_count = 0
-    for user_id in user_ids:
-        try:
-            await bot.send_message(user_id, message.text)
-            sent_count += 1
-        except Exception as e:
-            logger.error(f"Failed to send message to user {user_id}: {e}")
-
-    await message.reply(
-        f"Сообщение отправлено {sent_count} пользователям",
-        reply_markup=get_main_menu_markup(message.from_user.id)
-    )
-
-    # Clear state
-    user_states.pop(message.from_user.id, None)
-
-# Update message handler to handle mass messaging
-@dp.message_handler()
-async def handle_messages(message: types.Message):
-    user_id = message.from_user.id
-    state = user_states.get(user_id)
-
-    if state == "waiting_for_mass_message":
-        await process_mass_message(message)
-        return
-
-    # ... rest of the existing handle_messages function ...
-
-# Webhook handler for YooKassa payment notifications
-async def handle_payment_notification(request):
-    try:
-        payment_data = await request.json()
-        payment = Payment.find_one(payment_data['object']['id'])
-
-        if payment.status == 'succeeded':
-            user_id = payment.metadata.get('user_id')
-            period = payment.metadata.get('period')
-
-            # Update payment status in database
-            db.update_payment_status(payment.id, 'succeeded')
-
-            # Generate VPN key for user
-            client_name = f"user_{user_id}"
-            try:
-                vpn_key = await generate_vpn_key(client_name)
-                # Send VPN key to user
-                await bot.send_message(
-                    user_id,
-                    f"Спасибо за оплату! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
-                    "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN."
-                )
-            except Exception as e:
-                logger.error(f"Error generating VPN key after payment: {e}")
-                await bot.send_message(
-                    user_id,
-                    "Произошла ошибка при генерации ключа. Пожалуйста, обратитесь в поддержку."
-                )
-
-    except Exception as e:
-        logger.error(f"Error processing payment notification: {e}")
-        return web.Response(status=500)
-
-    return web.Response(status=200)
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)
