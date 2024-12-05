@@ -1071,17 +1071,18 @@ async def check_payment_status(callback_query: types.CallbackQuery):
                 await callback_query.answer(
                     "Произошла ошибка при генерации ключа. Пожалуйста, обратитесь в поддержку.",
                     show_alert=True
-        return
-    elif payment.status == 'pending':
-        await callback_query.answer(
-            "Оплата еще не поступила. Пожалуйста, подождите или попробуйте позже.",
-            show_alert=True
-        )
-    else:
-        await callback_query.answer(
-            f"Статус платежа: {payment.status}. Попробуйте оплатить снова.",
-            show_alert=True
-        )
+                )
+                return
+        elif payment.status == 'pending':
+            await callback_query.answer(
+                "Оплата еще не поступила. Пожалуйста, подождите или попробуйте позже.",
+                show_alert=True
+            )
+        else:
+            await callback_query.answer(
+                f"Статус платежа: {payment.status}. Попробуйте оплатить снова.",
+                show_alert=True
+            )
     except Exception as e:
         logger.error(f"Error checking payment status: {e}")
         await callback_query.answer(
