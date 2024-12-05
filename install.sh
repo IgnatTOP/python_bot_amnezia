@@ -219,14 +219,14 @@ install_and_configure_needrestart() {
 }
 
 clone_repository() {
-    if [[ -d "python_bot_amnezia" ]]; then
+    if [[ -d "awg-docker-bot" ]]; then
         echo -e "\n${YELLOW}Репозиторий существует${NC}"
-        cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+        cd awg-docker-bot || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
         return 0
     fi
     
-    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git >/dev/null 2>&1"
-    cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+    run_with_spinner "Клонирование репозитория" "git clone https://github.com/JB-SelfCompany/awg-docker-bot.git >/dev/null 2>&1"
+    cd awg-docker-bot || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
 }
 
 setup_venv() {
@@ -246,71 +246,52 @@ set_permissions() {
 }
 
 initialize_bot() {
-    cd "$SCRIPT_DIR"
+    echo -e "${BLUE}Инициализация бота...${NC}"
     
-    if [ ! -d "files" ]; then
-        mkdir -p files/connections
+    if [ -f "files/setting.ini" ]; then
+        read -p "Файл конфигурации уже существует. Хотите пересоздать его? (y/n): " recreate
+        if [ "$recreate" != "y" ]; then
+            echo -e "${GREEN}Используем существующий файл конфигурации${NC}"
+            return 0
+        fi
     fi
     
-    if [ ! -f "files/setting.ini" ]; then
-        echo -e "\n${BLUE}Настройка бота${NC}"
-        
-        # Создание конфигурационного файла
-        python3.11 -c "
-import configparser
-import subprocess
-import os
-
-config = configparser.ConfigParser()
-config.add_section('setting')
-
-config.set('setting', 'bot_token', '7782664718:AAFkre94HlYW_RCDqA2YBUc8guo2B5-EpSM')
-config.set('setting', 'admin_id', '487523019')
-
-# Получение имени docker контейнера
-cmd = \"docker ps --filter 'name=amnezia-awg' --format '{{.Names}}'\"
-docker_container = subprocess.check_output(cmd, shell=True).decode().strip()
-if not docker_container:
-    print('Docker-контейнер amnezia-awg не найден')
-    exit(1)
-config.set('setting', 'docker_container', docker_container)
-
-# Поиск файла конфигурации WireGuard
-cmd = f'docker exec {docker_container} find / -name wg0.conf'
-try:
-    wg_config_file = subprocess.check_output(cmd, shell=True).decode().strip()
-    if not wg_config_file:
-        wg_config_file = '/opt/amnezia/awg/wg0.conf'
-except:
-    wg_config_file = '/opt/amnezia/awg/wg0.conf'
-config.set('setting', 'wg_config_file', wg_config_file)
-
-# Получение внешнего IP
-try:
-    endpoint = subprocess.check_output('curl -s https://api.ipify.org', shell=True).decode().strip()
-except:
-    print('Не удалось получить внешний IP')
-    exit(1)
-config.set('setting', 'endpoint', endpoint)
-
-os.makedirs('files', exist_ok=True)
-with open('files/setting.ini', 'w') as f:
-    config.write(f)
-"
+    mkdir -p files
+    
+    read -p "Введите токен Telegram бота: " bot_token
+    read -p "Введите Telegram ID администратора: " admin_id
+    read -p "Введите Shop ID YooKassa: " yookassa_shop_id
+    read -p "Введите секретный ключ YooKassa: " yookassa_token
+    
+    docker_container=$(get_amnezia_container)
+    echo -e "${GREEN}Найден Docker-контейнер: $docker_container${NC}"
+    
+    cmd="docker exec $docker_container find / -name wg0.conf"
+    wg_config_file=$(eval "$cmd")
+    if [ -z "$wg_config_file" ]; then
+        echo -e "${YELLOW}Не удалось найти файл конфигурации WireGuard 'wg0.conf' в контейнере. Используется путь по умолчанию${NC}"
+        wg_config_file="/opt/amnezia/awg/wg0.conf"
     fi
     
-    # Create directories for user data
-    mkdir -p users
-    mkdir -p files/connections
+    endpoint=$(curl -s https://api.ipify.org)
+    if ! valid_ip "$endpoint"; then
+        echo -e "${YELLOW}Не удалось автоматически определить внешний IP-адрес${NC}"
+        read -p "Введите внешний IP-адрес сервера: " endpoint
+    fi
     
-    # Set up YooKassa configuration
-    echo '{
-        "shop_id": "993270",
-        "secret_key": "test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE",
-        "return_url": "https://t.me/AmneziaVPNIZbot"
-    }' > files/yookassa_config.json
+    cat > files/setting.ini << EOL
+[setting]
+bot_token = $bot_token
+admin_id = $admin_id
+docker_container = $docker_container
+wg_config_file = $wg_config_file
+endpoint = $endpoint
+yookassa_shop_id = $yookassa_shop_id
+yookassa_token = $yookassa_token
+EOL
     
-    chmod -R 755 .
+    echo -e "${GREEN}Конфигурация сохранена в files/setting.ini${NC}"
+    return 0
 }
 
 create_service() {
@@ -321,8 +302,8 @@ After=network.target
 
 [Service]
 User=$USER
-WorkingDirectory=$(pwd)/python_bot_amnezia/awg
-ExecStart=$(pwd)/python_bot_amnezia/myenv/bin/python3.11 bot_manager.py
+WorkingDirectory=$(pwd)/awg
+ExecStart=$(pwd)/myenv/bin/python3.11 bot_manager.py
 Restart=always
 
 [Install]

@@ -9,6 +9,8 @@ import tempfile
 from datetime import datetime
 
 EXPIRATIONS_FILE = 'files/expirations.json'
+PAYMENTS_FILE = 'files/payments.json'
+LICENSES_FILE = 'files/licenses.json'
 UTC = pytz.UTC
 
 logging.basicConfig(level=logging.INFO)
@@ -382,3 +384,84 @@ def get_user_expiration(username: str):
 def get_user_traffic_limit(username: str):
     expirations = load_expirations()
     return expirations.get(username, {}).get('traffic_limit', "Неограниченно")
+
+# Payment and license related functions
+
+def load_payments():
+    if os.path.exists(PAYMENTS_FILE):
+        try:
+            with open(PAYMENTS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_payments(payments):
+    os.makedirs(os.path.dirname(PAYMENTS_FILE), exist_ok=True)
+    with open(PAYMENTS_FILE, 'w') as f:
+        json.dump(payments, f, indent=4)
+
+def add_payment(user_id, amount, payment_id, status='pending'):
+    payments = load_payments()
+    payment = {
+        'user_id': user_id,
+        'amount': amount,
+        'payment_id': payment_id,
+        'status': status,
+        'timestamp': datetime.now(UTC).isoformat()
+    }
+    payments.append(payment)
+    save_payments(payments)
+    return payment
+
+def update_payment_status(payment_id, status):
+    payments = load_payments()
+    for payment in payments:
+        if payment['payment_id'] == payment_id:
+            payment['status'] = status
+            payment['updated_at'] = datetime.now(UTC).isoformat()
+            save_payments(payments)
+            return True
+    return False
+
+def get_user_payments(user_id):
+    payments = load_payments()
+    return [p for p in payments if p['user_id'] == user_id]
+
+def get_all_payments():
+    return load_payments()
+
+def load_licenses():
+    if os.path.exists(LICENSES_FILE):
+        try:
+            with open(LICENSES_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_licenses(licenses):
+    os.makedirs(os.path.dirname(LICENSES_FILE), exist_ok=True)
+    with open(LICENSES_FILE, 'w') as f:
+        json.dump(licenses, f, indent=4)
+
+def add_user_license(user_id):
+    licenses = load_licenses()
+    licenses[str(user_id)] = {
+        'active': True,
+        'created_at': datetime.now(UTC).isoformat()
+    }
+    save_licenses(licenses)
+
+def check_user_license(user_id):
+    licenses = load_licenses()
+    return str(user_id) in licenses and licenses[str(user_id)]['active']
+
+def revoke_user_license(user_id):
+    licenses = load_licenses()
+    if str(user_id) in licenses:
+        licenses[str(user_id)]['active'] = False
+        licenses[str(user_id)]['revoked_at'] = datetime.now(UTC).isoformat()
+        save_licenses(licenses)
+        return True
+    return False
