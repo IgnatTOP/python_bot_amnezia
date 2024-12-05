@@ -209,8 +209,7 @@ check_python() {
 }
 
 install_dependencies() {
-    run_with_spinner "Установка зависимостей" "sudo apt-get install -y python3-pip python3-venv git"
-    run_with_spinner "Установка дополнительных зависимостей" "sudo apt-get install -y python3-dev build-essential"
+    run_with_spinner "Установка зависимостей" "sudo apt-get install qrencode jq net-tools iptables resolvconf git -y -qq"
 }
 
 install_and_configure_needrestart() {
@@ -223,19 +222,20 @@ clone_repository() {
     if [[ -d "python_bot_amnezia" ]]; then
         echo -e "\n${YELLOW}Репозиторий существует${NC}"
         cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
-    else
-        run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git python_bot_amnezia"
-        cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+        return 0
     fi
-    SCRIPT_DIR="$(pwd)"
+    
+    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git >/dev/null 2>&1"
+    cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
 }
 
 setup_venv() {
-    run_with_spinner "Создание виртуального окружения" "python3 -m venv venv"
-    source venv/bin/activate
-    run_with_spinner "Обновление pip" "./venv/bin/pip install --upgrade pip"
-    run_with_spinner "Установка зависимостей" "./venv/bin/pip install -r requirements.txt"
-    run_with_spinner "Установка YooKassa" "./venv/bin/pip install yookassa"
+    if [[ -d "myenv" ]]; then
+        echo -e "\n${YELLOW}Виртуальное окружение существует${NC}"
+        return 0
+    fi
+    
+    run_with_spinner "Настройка виртуального окружения" "python3.11 -m venv myenv && source myenv/bin/activate && pip install --upgrade pip && pip install -r $(pwd)/requirements.txt && deactivate"
 }
 
 set_permissions() {
@@ -246,68 +246,95 @@ set_permissions() {
 }
 
 initialize_bot() {
-    if [ ! -f "$SCRIPT_DIR/files/setting.ini" ]; then
-        echo -e "\n${YELLOW}Настройка бота${NC}"
-        
-        read -p "Введите токен Telegram бота: " bot_token
-        read -p "Введите Telegram ID администратора: " admin_id
-        read -p "Введите Shop ID YooKassa: " yookassa_shop_id
-        read -p "Введите Secret Key YooKassa: " yookassa_secret_key
-        
-        docker_container=$(get_amnezia_container)
-        
-        cmd="docker exec $docker_container find / -name wg0.conf"
-        wg_config_file=$(eval "$cmd" 2>/dev/null || echo "/opt/amnezia/awg/wg0.conf")
-        
-        endpoint=$(curl -s https://api.ipify.org || read -p "Введите внешний IP-адрес сервера: ")
-        
-        mkdir -p "$SCRIPT_DIR/files"
-        
-        cat > "$SCRIPT_DIR/files/setting.ini" << EOL
-[setting]
-bot_token = $bot_token
-admin_id = $admin_id
-docker_container = $docker_container
-wg_config_file = $wg_config_file
-endpoint = $endpoint
-yookassa_shop_id = $yookassa_shop_id
-yookassa_secret_key = $yookassa_secret_key
-EOL
-        
-        echo -e "${GREEN}Файл конфигурации создан${NC}"
-    else
-        echo -e "${YELLOW}Файл конфигурации уже существует${NC}"
+    cd "$SCRIPT_DIR"
+    
+    if [ ! -d "files" ]; then
+        mkdir -p files/connections
     fi
     
-    # Create required directories
-    mkdir -p "$SCRIPT_DIR/files/connections"
-    mkdir -p "$SCRIPT_DIR/files/traffic"
-    mkdir -p "$SCRIPT_DIR/files/payments"
+    if [ ! -f "files/setting.ini" ]; then
+        echo -e "\n${BLUE}Настройка бота${NC}"
+        
+        # Создание конфигурационного файла
+        python3.11 -c "
+import configparser
+import subprocess
+import os
+
+config = configparser.ConfigParser()
+config.add_section('setting')
+
+config.set('setting', 'bot_token', '7782664718:AAFkre94HlYW_RCDqA2YBUc8guo2B5-EpSM')
+config.set('setting', 'admin_id', '487523019')
+
+# Получение имени docker контейнера
+cmd = \"docker ps --filter 'name=amnezia-awg' --format '{{.Names}}'\"
+docker_container = subprocess.check_output(cmd, shell=True).decode().strip()
+if not docker_container:
+    print('Docker-контейнер amnezia-awg не найден')
+    exit(1)
+config.set('setting', 'docker_container', docker_container)
+
+# Поиск файла конфигурации WireGuard
+cmd = f'docker exec {docker_container} find / -name wg0.conf'
+try:
+    wg_config_file = subprocess.check_output(cmd, shell=True).decode().strip()
+    if not wg_config_file:
+        wg_config_file = '/opt/amnezia/awg/wg0.conf'
+except:
+    wg_config_file = '/opt/amnezia/awg/wg0.conf'
+config.set('setting', 'wg_config_file', wg_config_file)
+
+# Получение внешнего IP
+try:
+    endpoint = subprocess.check_output('curl -s https://api.ipify.org', shell=True).decode().strip()
+except:
+    print('Не удалось получить внешний IP')
+    exit(1)
+config.set('setting', 'endpoint', endpoint)
+
+os.makedirs('files', exist_ok=True)
+with open('files/setting.ini', 'w') as f:
+    config.write(f)
+"
+    fi
     
-    # Set proper permissions
-    chown -R $SUDO_USER:$SUDO_USER "$SCRIPT_DIR/files"
-    chmod -R 755 "$SCRIPT_DIR/files"
+    # Create directories for user data
+    mkdir -p users
+    mkdir -p files/connections
+    
+    # Set up YooKassa configuration
+    echo '{
+        "shop_id": "993270",
+        "secret_key": "test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE",
+        "return_url": "https://t.me/AmneziaVPNIZbot"
+    }' > files/yookassa_config.json
+    
+    chmod -R 755 .
 }
 
 create_service() {
-    cat > /etc/systemd/system/${SERVICE_NAME}.service << EOL
+    cat > /tmp/service_file << EOF
 [Unit]
-Description=AWG Bot Service
+Description=AmneziaVPN Docker Telegram Bot
 After=network.target
 
 [Service]
 User=$USER
-WorkingDirectory=$SCRIPT_DIR
-ExecStart=$SCRIPT_DIR/venv/bin/python3 awg/bot_manager.py
+WorkingDirectory=$(pwd)/python_bot_amnezia/awg
+ExecStart=$(pwd)/python_bot_amnezia/myenv/bin/python3.11 bot_manager.py
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOL
+EOF
 
-    run_with_spinner "Перезагрузка systemd" "systemctl daemon-reload"
-    run_with_spinner "Включение сервиса" "systemctl enable ${SERVICE_NAME}.service"
-    run_with_spinner "Запуск сервиса" "systemctl start ${SERVICE_NAME}.service"
+    run_with_spinner "Создание службы" "sudo mv /tmp/service_file /etc/systemd/system/$SERVICE_NAME.service"
+    run_with_spinner "Обновление systemd" "sudo systemctl daemon-reload -qq"
+    run_with_spinner "Запуск службы" "sudo systemctl start $SERVICE_NAME -qq"
+    run_with_spinner "Включение автозапуска" "sudo systemctl enable $SERVICE_NAME -qq"
+    
+    systemctl is-active --quiet "$SERVICE_NAME" && echo -e "\n${GREEN}Служба запущена${NC}" || echo -e "\n${RED}Ошибка запуска службы${NC}"
 }
 
 install_bot() {

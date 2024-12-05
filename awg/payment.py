@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 from datetime import datetime
 from yookassa import Configuration, Payment
 
@@ -20,7 +21,8 @@ def save_payments(payments):
     with open(PAYMENTS_FILE, 'w') as f:
         json.dump(payments, f)
 
-def create_payment(amount, user_id, description="VPN Key Purchase"):
+def create_payment(amount, user_id, description="VPN Key"):
+    idempotence_key = str(uuid.uuid4())
     payment = Payment.create({
         "amount": {
             "value": str(amount),
@@ -35,9 +37,8 @@ def create_payment(amount, user_id, description="VPN Key Purchase"):
         "metadata": {
             "user_id": str(user_id)
         }
-    })
+    }, idempotence_key)
     
-    # Save payment info
     payments = load_payments()
     payments[payment.id] = {
         "user_id": user_id,
@@ -53,7 +54,6 @@ def create_payment(amount, user_id, description="VPN Key Purchase"):
 def check_payment(payment_id):
     payment = Payment.find_one(payment_id)
     
-    # Update payment status
     payments = load_payments()
     if payment_id in payments:
         payments[payment_id]["status"] = payment.status

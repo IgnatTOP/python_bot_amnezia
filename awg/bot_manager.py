@@ -1,5 +1,4 @@
 import db
-import payment
 import aiohttp
 import logging
 import asyncio
@@ -24,6 +23,7 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+import payment
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,52 +45,14 @@ WG_CONFIG_FILE = wg_config_file
 DOCKER_CONTAINER = docker_container
 ENDPOINT = endpoint
 
-dp = Dispatcher(bot)
-scheduler = AsyncIOScheduler(timezone=pytz.UTC)
-scheduler.start()
-
-# Define prices
-PRICES = {
-    "1_month": 300,  # 300 RUB for 1 month
-    "3_months": 800,  # 800 RUB for 3 months
-    "6_months": 1500,  # 1500 RUB for 6 months
-    "12_months": 2800,  # 2800 RUB for 12 months
-}
-
-# User menu markup
-user_menu_markup = InlineKeyboardMarkup(row_width=1).add(
-    InlineKeyboardButton("Купить VPN", callback_data="buy_vpn"),
-    InlineKeyboardButton("Мой VPN ключ", callback_data="my_key"),
-    InlineKeyboardButton("Обновить ключ", callback_data="regenerate_key"),
-    InlineKeyboardButton("Удалить ключ", callback_data="delete_key")
-)
-
-# Admin menu markup
-admin_menu_markup = InlineKeyboardMarkup(row_width=1).add(
-    InlineKeyboardButton("Добавить пользователя", callback_data="add_user"),
-    InlineKeyboardButton("Получить конфигурацию пользователя", callback_data="get_config"),
-    InlineKeyboardButton("Список клиентов", callback_data="list_users"),
-    InlineKeyboardButton("История платежей", callback_data="payment_history"),
-    InlineKeyboardButton("Отправить сообщение всем", callback_data="mass_message"),
-    InlineKeyboardButton("Создать бекап", callback_data="create_backup")
-)
-
-# Payment menu markup
-def get_payment_markup():
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("1 месяц - 300₽", callback_data="pay_1_month"),
-        InlineKeyboardButton("3 месяца - 800₽", callback_data="pay_3_months"),
-        InlineKeyboardButton("6 месяцев - 1500₽", callback_data="pay_6_months"),
-        InlineKeyboardButton("12 месяцев - 2800₽", callback_data="pay_12_months"),
-        InlineKeyboardButton("« Назад", callback_data="return_home")
-    )
-    return markup
-
 class AdminMessageDeletionMiddleware(BaseMiddleware):
     async def on_process_message(self, message: types.Message, data: dict):
         if message.from_user.id == admin:
             asyncio.create_task(delete_message_after_delay(message.chat.id, message.message_id, delay=2))
+
+dp = Dispatcher(bot)
+scheduler = AsyncIOScheduler(timezone=pytz.UTC)
+scheduler.start()
 
 dp.middleware.setup(AdminMessageDeletionMiddleware())
 
@@ -98,7 +60,15 @@ main_menu_markup = InlineKeyboardMarkup(row_width=1).add(
     InlineKeyboardButton("Добавить пользователя", callback_data="add_user"),
     InlineKeyboardButton("Получить конфигурацию пользователя", callback_data="get_config"),
     InlineKeyboardButton("Список клиентов", callback_data="list_users"),
+    InlineKeyboardButton("История платежей", callback_data="payment_history"),
+    InlineKeyboardButton("Массовая рассылка", callback_data="mass_message"),
     InlineKeyboardButton("Создать бекап", callback_data="create_backup")
+)
+
+user_menu_markup = InlineKeyboardMarkup(row_width=1).add(
+    InlineKeyboardButton("Купить VPN ключ", callback_data="buy_key"),
+    InlineKeyboardButton("Мои ключи", callback_data="my_keys"),
+    InlineKeyboardButton("Поддержка", callback_data="support")
 )
 
 user_main_messages = {}
@@ -229,23 +199,15 @@ def parse_relative_time(relative_str: str) -> datetime:
 @dp.message_handler(commands=['start', 'help'])
 async def help_command_handler(message: types.Message):
     if message.chat.id == admin:
-        sent_message = await message.answer("Выберите действие:", reply_markup=admin_menu_markup)
+        sent_message = await message.answer("Выберите действие:", reply_markup=main_menu_markup)
+        user_main_messages[admin] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
+        try:
+            await bot.pin_chat_message(chat_id=message.chat.id, message_id=sent_message.message_id, disable_notification=True)
+        except:
+            pass
     else:
         sent_message = await message.answer("Добро пожаловать! Выберите действие:", reply_markup=user_menu_markup)
-    
-    user_main_messages[message.chat.id] = {
-        'chat_id': sent_message.chat.id,
-        'message_id': sent_message.message_id
-    }
-    
-    try:
-        await bot.pin_chat_message(
-            chat_id=message.chat.id,
-            message_id=sent_message.message_id,
-            disable_notification=True
-        )
-    except:
-        pass
+        user_main_messages[message.chat.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
 
 @dp.message_handler()
 async def handle_messages(message: types.Message):
@@ -1156,123 +1118,185 @@ async def on_shutdown(dp):
     scheduler.shutdown()
     logger.info("Планировщик остановлен.")
 
-@dp.callback_query_handler(lambda c: c.data == 'buy_vpn')
-async def buy_vpn_callback(callback_query: types.CallbackQuery):
-    await bot.edit_message_text(
-        chat_id=callback_query.message.chat.id,
-        message_id=callback_query.message.message_id,
-        text="Выберите тарифный план:",
-        reply_markup=get_payment_markup()
-    )
+@dp.callback_query_handler(lambda c: c.data == 'buy_key')
+async def buy_key_handler(callback_query: types.CallbackQuery):
+    prices = [
+        ("1 месяц - 300₽", 300),
+        ("3 месяца - 800₽", 800),
+        ("6 месяцев - 1500₽", 1500),
+        ("12 месяцев - 2800₽", 2800)
+    ]
+    
+    markup = InlineKeyboardMarkup(row_width=1)
+    for label, amount in prices:
+        markup.add(InlineKeyboardButton(label, callback_data=f"pay_{amount}"))
+    markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+    
+    await callback_query.message.edit_text("Выберите тарифный план:", reply_markup=markup)
 
 @dp.callback_query_handler(lambda c: c.data.startswith('pay_'))
-async def handle_payment(callback_query: types.CallbackQuery):
-    duration = callback_query.data.replace('pay_', '')
-    price = PRICES.get(duration)
-    if not price:
-        await callback_query.answer("Неверный тарифный план")
-        return
+async def process_payment(callback_query: types.CallbackQuery):
+    amount = int(callback_query.data.split('_')[1])
+    payment_obj = payment.create_payment(amount, callback_query.from_user.id)
     
-    payment_info = payment.create_payment(price, callback_query.from_user.id)
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Оплатить", url=payment_obj.confirmation.confirmation_url))
+    markup.add(InlineKeyboardButton("Проверить оплату", callback_data=f"check_{payment_obj.id}"))
+    markup.add(InlineKeyboardButton("Назад", callback_data="buy_key"))
     
-    markup = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("Оплатить", url=payment_info.confirmation.confirmation_url),
-        InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{payment_info.id}")
-    )
-    
-    await bot.edit_message_text(
-        chat_id=callback_query.message.chat.id,
-        message_id=callback_query.message.message_id,
-        text=f"Для оплаты нажмите кнопку ниже. После оплаты нажмите 'Проверить оплату'.",
+    await callback_query.message.edit_text(
+        f"Сумма к оплате: {amount}₽\n\n"
+        "1. Нажмите кнопку «Оплатить»\n"
+        "2. Оплатите счет\n"
+        "3. Вернитесь в бот и нажмите «Проверить оплату»",
         reply_markup=markup
     )
 
-@dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
+@dp.callback_query_handler(lambda c: c.data.startswith('check_'))
 async def check_payment_status(callback_query: types.CallbackQuery):
-    payment_id = callback_query.data.replace('check_payment_', '')
+    payment_id = callback_query.data.split('_')[1]
     if payment.check_payment(payment_id):
-        # Generate VPN key for the user
+        # Generate VPN key
         username = f"user_{callback_query.from_user.id}"
-        await generate_vpn_key(username)
-        
-        # Get the configuration
-        config_text = await send_user_config(callback_query, username)
-        
-        await bot.edit_message_text(
-            chat_id=callback_query.message.chat.id,
-            message_id=callback_query.message.message_id,
-            text="Оплата прошла успешно! Ваш VPN ключ готов.",
-            reply_markup=user_menu_markup
+        if root_add(username):
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("Получить ключ", callback_data=f"get_key_{username}"))
+            markup.add(InlineKeyboardButton("В главное меню", callback_data="return_home"))
+            await callback_query.message.edit_text(
+                "Оплата прошла успешно! VPN ключ сгенерирован.",
+                reply_markup=markup
+            )
+        else:
+            await callback_query.message.edit_text(
+                "Оплата прошла успешно, но возникла ошибка при генерации ключа. Пожалуйста, обратитесь в поддержку.",
+                reply_markup=InlineKeyboardMarkup().add(
+                    InlineKeyboardButton("В главное меню", callback_data="return_home")
+                )
+            )
+    else:
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Проверить снова", callback_data=callback_query.data))
+        markup.add(InlineKeyboardButton("Назад", callback_data="buy_key"))
+        await callback_query.message.edit_text(
+            "Оплата не найдена или еще не прошла. Попробуйте проверить позже.",
+            reply_markup=markup
         )
+
+@dp.callback_query_handler(lambda c: c.data == 'my_keys')
+async def my_keys_handler(callback_query: types.CallbackQuery):
+    username = f"user_{callback_query.from_user.id}"
+    clients = get_client_list()
+    user_keys = [client for client in clients if client[0] == username]
+    
+    if user_keys:
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("Получить ключ", callback_data=f"get_key_{username}"))
+        markup.add(InlineKeyboardButton("Удалить ключ", callback_data=f"delete_key_{username}"))
+        markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
         
-        # Send the configuration in a separate message
-        await bot.send_message(
-            chat_id=callback_query.message.chat.id,
-            text=f"Ваша конфигурация:\n\n{config_text}"
+        await callback_query.message.edit_text(
+            "Управление вашим VPN ключом:",
+            reply_markup=markup
         )
     else:
-        await callback_query.answer("Оплата еще не поступила. Попробуйте проверить позже.")
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Купить ключ", callback_data="buy_key"))
+        markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+        await callback_query.message.edit_text(
+            "У вас пока нет активных ключей.",
+            reply_markup=markup
+        )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('get_key_'))
+async def get_user_key(callback_query: types.CallbackQuery):
+    username = callback_query.data.split('_')[1]
+    if callback_query.from_user.id == admin or f"user_{callback_query.from_user.id}" == username:
+        config_file = f"users/{username}/client.conf"
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as f:
+                config = f.read()
+            formatted_config = format_vpn_key(config)
+            
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("Назад", callback_data="my_keys" if callback_query.from_user.id != admin else "return_home"))
+            
+            await callback_query.message.edit_text(
+                f"Ваш VPN ключ:\n\n{formatted_config}",
+                reply_markup=markup
+            )
+        else:
+            await callback_query.message.edit_text(
+                "Ошибка: файл конфигурации не найден.",
+                reply_markup=InlineKeyboardMarkup().add(
+                    InlineKeyboardButton("Назад", callback_data="return_home")
+                )
+            )
+    else:
+        await callback_query.answer("У вас нет доступа к этому ключу.")
 
 @dp.callback_query_handler(lambda c: c.data == 'payment_history')
-async def show_payment_history(callback_query: types.CallbackQuery):
+async def payment_history_handler(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("Доступ запрещен")
         return
-    
+        
     payments = payment.get_all_payments()
-    text = "История платежей:\n\n"
-    for payment_id, payment_data in payments.items():
-        text += f"ID: {payment_id}\n"
-        text += f"Пользователь: {payment_data['user_id']}\n"
-        text += f"Сумма: {payment_data['amount']} RUB\n"
-        text += f"Статус: {payment_data['status']}\n"
-        text += f"Дата: {payment_data['created_at']}\n\n"
+    if payments:
+        text = "История платежей:\n\n"
+        for payment_id, data in payments.items():
+            status = "✅ Успешно" if data["status"] == "succeeded" else "❌ Не оплачен"
+            date = datetime.fromisoformat(data["created_at"]).strftime("%d.%m.%Y %H:%M")
+            text += f"ID: {payment_id}\n"
+            text += f"Пользователь: {data['user_id']}\n"
+            text += f"Сумма: {data['amount']}₽\n"
+            text += f"Статус: {status}\n"
+            text += f"Дата: {date}\n\n"
+    else:
+        text = "История платежей пуста"
     
-    await bot.edit_message_text(
-        chat_id=callback_query.message.chat.id,
-        message_id=callback_query.message.message_id,
-        text=text,
-        reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton("« Назад", callback_data="return_home")
-        )
+    markup = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("Назад", callback_data="return_home")
     )
+    
+    await callback_query.message.edit_text(text, reply_markup=markup)
 
 @dp.callback_query_handler(lambda c: c.data == 'mass_message')
-async def start_mass_message(callback_query: types.CallbackQuery):
+async def mass_message_handler(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("Доступ запрещен")
         return
     
-    await bot.edit_message_text(
-        chat_id=callback_query.message.chat.id,
-        message_id=callback_query.message.message_id,
-        text="Отправьте сообщение, которое нужно разослать всем пользователям:",
+    await callback_query.message.edit_text(
+        "Для отправки сообщения всем пользователям, используйте команду:\n"
+        "/send_all <текст сообщения>",
         reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton("« Отмена", callback_data="return_home")
+            InlineKeyboardButton("Назад", callback_data="return_home")
         )
     )
-    
-    # Set state for next message
-    dp.register_message_handler(handle_mass_message)
 
-async def handle_mass_message(message: types.Message):
+@dp.message_handler(lambda message: message.text.startswith('/send_all'))
+async def send_all_handler(message: types.Message):
     if message.from_user.id != admin:
+        await message.answer("Доступ запрещен")
         return
     
-    # Get all users from the database
-    users = db.get_clients_from_clients_table()
+    text = message.text.replace('/send_all', '').strip()
+    if not text:
+        await message.answer("Укажите текст сообщения после команды /send_all")
+        return
+    
+    clients = get_client_list()
     sent_count = 0
+    for client in clients:
+        username = client[0]
+        if username.startswith('user_'):
+            user_id = int(username.split('_')[1])
+            try:
+                await bot.send_message(user_id, text)
+                sent_count += 1
+            except:
+                continue
     
-    for user in users:
-        try:
-            await bot.send_message(chat_id=int(user), text=message.text)
-            sent_count += 1
-        except:
-            continue
-    
-    await message.reply(f"Сообщение отправлено {sent_count} пользователям.")
-    
-    # Remove the message handler
-    dp.message_handlers.unregister(handle_mass_message)
+    await message.answer(f"Сообщение отправлено {sent_count} пользователям")
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)
