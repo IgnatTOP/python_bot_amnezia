@@ -439,7 +439,7 @@ async def client_selected_callback(callback_query: types.CallbackQuery):
     _, username = callback_query.data.split('client_', 1)
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
-        InlineKeyboardButton("Получить конфигурацию", callback_data=f"get_config_{username}"),
+        InlineKeyboardButton("Получить конфигурацию", callback_data=f"send_config_{username}"),
         InlineKeyboardButton("Удалить пользователя", callback_data=f"delete_{username}"),
         InlineKeyboardButton("« Назад", callback_data="list_users"),
         InlineKeyboardButton("« В главное меню", callback_data="return_home")
@@ -455,25 +455,50 @@ async def list_users_callback(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
         return
-        
+
     clients = db.get_client_list()
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    
     if not clients:
-        keyboard = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("« Назад", callback_data="return_home")
-        )
+        keyboard.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
         await callback_query.message.edit_text(
             "Список пользователей пуст.",
             reply_markup=keyboard
         )
         return
-        
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    for username in clients:
-        keyboard.add(InlineKeyboardButton(username[0], callback_data=f"client_{username[0]}"))
+
+    for client in clients:
+        username = client[0]
+        keyboard.add(InlineKeyboardButton(username, callback_data=f"client_{username}"))
     keyboard.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
     
     await callback_query.message.edit_text(
         "Выберите пользователя:",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('delete_'))
+async def client_delete_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+        
+    _, username = callback_query.data.split('delete_', 1)
+    success = await deactivate_user(username)
+    
+    if success:
+        confirmation_text = f"Пользователь {username} успешно удален."
+    else:
+        confirmation_text = f"Не удалось удалить пользователя {username}."
+        
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton("« Назад к списку", callback_data="list_users"),
+        InlineKeyboardButton("« В главное меню", callback_data="return_home")
+    )
+    
+    await callback_query.message.edit_text(
+        confirmation_text,
         reply_markup=keyboard
     )
 
@@ -565,40 +590,6 @@ async def ip_info_callback(callback_query: types.CallbackQuery):
             logger.error(f"Ошибка при изменении сообщения: {e}")
             await callback_query.answer("Ошибка при обновлении сообщения.", show_alert=True)
             return
-    else:
-        await callback_query.answer("Ошибка: главное сообщение не найдено.", show_alert=True)
-        return
-    await callback_query.answer()
-
-@dp.callback_query_handler(lambda c: c.data.startswith('delete_user_'))
-async def client_delete_callback(callback_query: types.CallbackQuery):
-    username = callback_query.data.split('delete_user_')[1]
-    success = db.deactive_user_db(username)
-    if success:
-        db.remove_user_expiration(username)
-        try:
-            scheduler.remove_job(job_id=username)
-        except:
-            pass
-        user_dir = os.path.join('users', username)
-        try:
-            if os.path.exists(user_dir):
-                shutil.rmtree(user_dir)
-        except Exception as e:
-            logger.error(f"Ошибка при удалении директории для пользователя {username}: {e}")
-        confirmation_text = f"Пользователь **{username}** успешно удален."
-    else:
-        confirmation_text = f"Не удалось удалить пользователя **{username}**."
-    main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
-    main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
-    if main_chat_id and main_message_id:
-        await bot.edit_message_text(
-            chat_id=main_chat_id,
-            message_id=main_message_id,
-            text=confirmation_text,
-            parse_mode="Markdown",
-            reply_markup=get_main_menu_markup(callback_query.from_user.id)
-        )
     else:
         await callback_query.answer("Ошибка: главное сообщение не найдено.", show_alert=True)
         return
@@ -731,7 +722,7 @@ async def send_user_config(callback_query: types.CallbackQuery):
         asyncio.create_task(delete_message_after_delay(callback_query.from_user.id, message_id, delay=15))
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('create_backup'))
+@dp.callback_query_handler(lambda c: c.data == 'create_backup')
 async def create_backup_callback(callback_query: types.CallbackQuery):
     date_str = datetime.now().strftime('%Y-%m-%d')
     backup_filename = f"backup_{date_str}.zip"
@@ -757,8 +748,8 @@ def parse_transfer(transfer_str):
             incoming, outgoing = transfer_str.split('/')
             incoming = incoming.strip()
             outgoing = outgoing.strip()
-            incoming_match = re.match(r'([\d.]+)\s*(\w+)', incoming)
-            outgoing_match = re.match(r'([\d.]+)\s*(\w+)', outgoing)
+            incoming_match = re.match(r'^(\d+(?:\.\d+)?)\s*(\w+)$', incoming)
+            outgoing_match = re.match(r'^(\d+(?:\.\d+)?)\s*(\w+)$', outgoing)
             def convert_to_bytes(value, unit):
                 size_map = {
                     'B': 1,
@@ -778,8 +769,8 @@ def parse_transfer(transfer_str):
             if len(parts) >= 2:
                 incoming = parts[0].strip()
                 outgoing = parts[1].strip()
-                incoming_match = re.match(r'([\d.]+)\s*(\w+)', incoming)
-                outgoing_match = re.match(r'([\d.]+)\s*(\w+)', outgoing)
+                incoming_match = re.match(r'^(\d+(?:\.\d+)?)\s*(\w+)$', incoming)
+                outgoing_match = re.match(r'^(\d+(?:\.\d+)?)\s*(\w+)$', outgoing)
                 def convert_to_bytes(value, unit):
                     size_map = {
                         'B': 1,
@@ -1052,7 +1043,11 @@ async def check_payment_status(callback_query: types.CallbackQuery):
             # Update payment status in database
             db.update_payment_status(payment_id, 'succeeded')
             
-            # Generate VPN key for user
+            # Add license regardless of key generation success
+            license_data = db.add_license(user_id, period, payment_id)
+            expiration_date = datetime.fromisoformat(license_data['expiration_date'])
+            
+            # Try to generate VPN key
             client_name = f"user_{user_id}"
             try:
                 vpn_key = await generate_vpn_key(client_name)
@@ -1062,15 +1057,22 @@ async def check_payment_status(callback_query: types.CallbackQuery):
                 )
                 
                 await callback_query.message.edit_text(
-                    f"Оплата успешна! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+                    f"Оплата успешна! Ваша подписка активна до {expiration_date.strftime('%d.%m.%Y')}\n\n"
+                    f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
                     "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
                     reply_markup=keyboard
                 )
             except Exception as e:
                 logger.error(f"Error generating VPN key: {e}")
-                await callback_query.answer(
-                    "Произошла ошибка при генерации ключа. Пожалуйста, обратитесь в поддержку.",
-                    show_alert=True
+                keyboard = InlineKeyboardMarkup()
+                keyboard.add(
+                    InlineKeyboardButton("Попробовать снова", callback_data=f"retry_key_generation_{user_id}"),
+                    InlineKeyboardButton("« В главное меню", callback_data="return_home")
+                )
+                await callback_query.message.edit_text(
+                    f"Оплата успешна! Ваша подписка активна до {expiration_date.strftime('%d.%m.%Y')}\n\n"
+                    "Произошла ошибка при генерации ключа. Пожалуйста, попробуйте позже или обратитесь в поддержку.",
+                    reply_markup=keyboard
                 )
         elif payment.status == 'pending':
             await callback_query.answer(
@@ -1088,6 +1090,44 @@ async def check_payment_status(callback_query: types.CallbackQuery):
             "Произошла ошибка при проверке платежа. Попробуйте позже.",
             show_alert=True
         )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('retry_key_generation_'))
+async def retry_key_generation(callback_query: types.CallbackQuery):
+    user_id = int(callback_query.data.replace('retry_key_generation_', ''))
+    
+    if not db.has_active_license(user_id):
+        await callback_query.answer("У вас нет активной подписки", show_alert=True)
+        return
+        
+    license_data = db.get_user_active_license(user_id)
+    expiration_date = datetime.fromisoformat(license_data['expiration_date'])
+    
+    try:
+        client_name = f"user_{user_id}"
+        vpn_key = await generate_vpn_key(client_name)
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(
+            InlineKeyboardButton("« В главное меню", callback_data="return_home")
+        )
+        
+        await callback_query.message.edit_text(
+            f"Ваша подписка активна до {expiration_date.strftime('%d.%m.%Y')}\n\n"
+            f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+            "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Error generating VPN key on retry: {e}")
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(
+            InlineKeyboardButton("Попробовать снова", callback_data=f"retry_key_generation_{user_id}"),
+            InlineKeyboardButton("« В главное меню", callback_data="return_home")
+        )
+        await callback_query.message.edit_text(
+            f"Ваша подписка активна до {expiration_date.strftime('%d.%m.%Y')}\n\n"
+            "Произошла ошибка при генерации ключа. Пожалуйста, попробуйте позже или обратитесь в поддержку.",
+            reply_markup=keyboard
+        )    
 
 @dp.callback_query_handler(lambda c: c.data == 'my_vpn_key')
 async def my_vpn_key_callback(callback_query: types.CallbackQuery):

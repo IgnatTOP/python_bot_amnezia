@@ -6,10 +6,11 @@ import pytz
 import socket
 import logging
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 EXPIRATIONS_FILE = 'files/expirations.json'
 PAYMENTS_FILE = 'files/payments.json'
+LICENSES_FILE = 'files/licenses.json'
 UTC = pytz.UTC
 
 logging.basicConfig(level=logging.INFO)
@@ -429,3 +430,64 @@ def get_user_payments(user_id: int):
 
 def get_all_payments():
     return load_payments()
+
+def load_licenses():
+    if os.path.exists(LICENSES_FILE):
+        try:
+            with open(LICENSES_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_licenses(licenses):
+    os.makedirs(os.path.dirname(LICENSES_FILE), exist_ok=True)
+    with open(LICENSES_FILE, 'w') as f:
+        json.dump(licenses, f, indent=4)
+
+def add_license(user_id: int, period: str, payment_id: str):
+    licenses = load_licenses()
+    now = datetime.now(UTC)
+    
+    # Calculate expiration based on period
+    if period == '1_month':
+        expiration = now + timedelta(days=30)
+    elif period == '3_months':
+        expiration = now + timedelta(days=90)
+    elif period == '6_months':
+        expiration = now + timedelta(days=180)
+    elif period == '12_months':
+        expiration = now + timedelta(days=365)
+    else:
+        expiration = now + timedelta(days=30)  # Default to 1 month
+    
+    license_data = {
+        'payment_id': payment_id,
+        'period': period,
+        'purchase_date': now.isoformat(),
+        'expiration_date': expiration.isoformat(),
+        'status': 'active'
+    }
+    
+    if str(user_id) not in licenses:
+        licenses[str(user_id)] = []
+    licenses[str(user_id)].append(license_data)
+    save_licenses(licenses)
+    return license_data
+
+def get_user_active_license(user_id: int):
+    licenses = load_licenses()
+    user_licenses = licenses.get(str(user_id), [])
+    now = datetime.now(UTC)
+    
+    # Find the most recent active license that hasn't expired
+    active_licenses = [
+        lic for lic in user_licenses
+        if lic['status'] == 'active' and
+        datetime.fromisoformat(lic['expiration_date']) > now
+    ]
+    
+    return active_licenses[-1] if active_licenses else None
+
+def has_active_license(user_id: int):
+    return bool(get_user_active_license(user_id))
