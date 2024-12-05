@@ -67,19 +67,23 @@ scheduler.start()
 dp.middleware.setup(AdminMessageDeletionMiddleware())
 
 def get_main_menu_markup(user_id):
-    keyboard = InlineKeyboardMarkup(row_width=1)
+    markup = InlineKeyboardMarkup(row_width=1)
     if user_id == admin:
-        keyboard.add(
-            InlineKeyboardButton("Админ-панель", callback_data="admin_panel"),
-            InlineKeyboardButton("Мой VPN", callback_data="my_vpn"),
-            InlineKeyboardButton("Купить VPN", callback_data="buy_vpn")
+        markup.add(
+            InlineKeyboardButton("Добавить пользователя", callback_data="add_user"),
+            InlineKeyboardButton("Получить конфигурацию пользователя", callback_data="get_config"),
+            InlineKeyboardButton("Список клиентов", callback_data="list_users"),
+            InlineKeyboardButton("Создать бекап", callback_data="create_backup"),
+            InlineKeyboardButton("История платежей", callback_data="payment_history"),
+            InlineKeyboardButton("Отправить сообщение всем", callback_data="mass_message")
         )
     else:
-        keyboard.add(
-            InlineKeyboardButton("Мой VPN", callback_data="my_vpn"),
-            InlineKeyboardButton("Купить VPN", callback_data="buy_vpn")
+        markup.add(
+            InlineKeyboardButton("Купить VPN", callback_data="buy_vpn"),
+            InlineKeyboardButton("Мой VPN ключ", callback_data="my_vpn_key"),
+            InlineKeyboardButton("Помощь", callback_data="help")
         )
-    return keyboard
+    return markup
 
 user_main_messages = {}
 isp_cache = {}
@@ -157,176 +161,54 @@ async def load_isp_cache_task():
     await load_isp_cache()
     scheduler.add_job(cleanup_isp_cache, 'interval', hours=1)
 
-@dp.callback_query_handler(lambda c: c.data == "admin_panel")
-async def admin_panel(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен", show_alert=True)
-        return
-        
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("Список пользователей", callback_data="admin_users"),
-        InlineKeyboardButton("Создать пользователя", callback_data="admin_create_user"),
-        InlineKeyboardButton("Создать бэкап", callback_data="admin_backup"),
-        InlineKeyboardButton("« Главное меню", callback_data="main_menu")
-    )
-    
-    await callback_query.message.edit_text(
-        "Панель администратора:",
-        reply_markup=keyboard
-    )
+def create_zip(backup_filepath):
+    with zipfile.ZipFile(backup_filepath, 'w') as zipf:
+        for main_file in ['awg-decode.py', 'newclient.sh', 'removeclient.sh']:
+            if os.path.exists(main_file):
+                zipf.write(main_file, main_file)
+        for root, dirs, files in os.walk('files'):
+            for file in files:
+                filepath = os.path.join(root, file)
+                arcname = os.path.relpath(filepath, os.getcwd())
+                zipf.write(filepath, arcname)
+        for root, dirs, files in os.walk('users'):
+            for file in files:
+                filepath = os.path.join(root, file)
+                arcname = os.path.relpath(filepath, os.getcwd())
+                zipf.write(filepath, arcname)
 
-@dp.callback_query_handler(lambda c: c.data == "admin_users")
-async def admin_users(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен", show_alert=True)
-        return
-        
-    users = db.get_client_list()
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    
-    if not users:
-        keyboard.add(InlineKeyboardButton("« Назад", callback_data="admin_panel"))
-        await callback_query.message.edit_text(
-            "Список пользователей пуст",
-            reply_markup=keyboard
-        )
-        return
-    
-    for user in users:
-        keyboard.add(InlineKeyboardButton(user[0], callback_data=f"admin_user_{user[0]}"))
-    keyboard.add(InlineKeyboardButton("« Назад", callback_data="admin_panel"))
-    
-    await callback_query.message.edit_text(
-        "Выберите пользователя:",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data.startswith("admin_user_"))
-async def admin_user_actions(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен", show_alert=True)
-        return
-        
-    username = callback_query.data.replace("admin_user_", "")
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("Получить ключ", callback_data=f"admin_get_key_{username}"),
-        InlineKeyboardButton("Удалить пользователя", callback_data=f"admin_delete_{username}"),
-        InlineKeyboardButton("« К списку", callback_data="admin_users"),
-        InlineKeyboardButton("« Главное меню", callback_data="main_menu")
-    )
-    
-    await callback_query.message.edit_text(
-        f"Действия с пользователем {username}:",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data == "main_menu")
-async def show_main_menu(callback_query: types.CallbackQuery):
-    markup = get_main_menu_markup(callback_query.from_user.id)
-    await callback_query.message.edit_text(
-        "Главное меню:",
-        reply_markup=markup
-    )
-
-@dp.callback_query_handler(lambda c: c.data.startswith("admin_get_key_"))
-async def admin_get_key(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен", show_alert=True)
-        return
-        
-    username = callback_query.data.replace("admin_get_key_", "")
+async def delete_message_after_delay(chat_id: int, message_id: int, delay: int):
+    await asyncio.sleep(delay)
     try:
-        config = db.get_config()
-        result = subprocess.run(
-            ['bash', 'awg/newclient.sh', username, config['endpoint'], config['wg_config'], config['container']],
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode == 0:
-            keyboard = InlineKeyboardMarkup(row_width=1)
-            keyboard.add(
-                InlineKeyboardButton("« К пользователю", callback_data=f"admin_user_{username}"),
-                InlineKeyboardButton("« К списку", callback_data="admin_users"),
-                InlineKeyboardButton("« Главное меню", callback_data="main_menu")
-            )
-            
-            await callback_query.message.edit_text(
-                f"Ключ для {username}:\n\n{format_vpn_key(result.stdout)}\n\n",
-                reply_markup=keyboard
-            )
-        else:
-            raise Exception(result.stderr)
-            
-    except Exception as e:
-        logger.error(f"Error generating key for {username}: {e}")
-        keyboard = InlineKeyboardMarkup(row_width=1)
-        keyboard.add(
-            InlineKeyboardButton("« К пользователю", callback_data=f"admin_user_{username}"),
-            InlineKeyboardButton("« Главное меню", callback_data="main_menu")
-        )
-        await callback_query.message.edit_text(
-            "Ошибка при генерации ключа",
-            reply_markup=keyboard
-        )
+        await bot.delete_message(chat_id, message_id)
+    except:
+        pass
 
-@dp.callback_query_handler(lambda c: c.data.startswith("admin_delete_"))
-async def admin_delete_user(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен", show_alert=True)
-        return
-        
-    username = callback_query.data.replace("admin_delete_", "")
-    success = await deactivate_user(username)
-    
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("« К списку", callback_data="admin_users"),
-        InlineKeyboardButton("« Главное меню", callback_data="main_menu")
-    )
-    
-    text = f"Пользователь {username} {'успешно удален' if success else 'не удален'}"
-    await callback_query.message.edit_text(text, reply_markup=keyboard)
-
-@dp.callback_query_handler(lambda c: c.data == "my_vpn")
-async def show_my_vpn(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    username = f"user_{user_id}"
-    
+def parse_relative_time(relative_str: str) -> datetime:
     try:
-        config = db.get_config()
-        result = subprocess.run(
-            ['bash', 'awg/newclient.sh', username, config['endpoint'], config['wg_config'], config['container']],
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode == 0:
-            keyboard = InlineKeyboardMarkup(row_width=1)
-            keyboard.add(
-                InlineKeyboardButton("« Главное меню", callback_data="main_menu")
-            )
-            
-            await callback_query.message.edit_text(
-                f"Ваш VPN ключ:\n\n{format_vpn_key(result.stdout)}\n\n"
-                "Скопируйте ключ и следуйте инструкции в приложении Amnezia VPN",
-                reply_markup=keyboard
-            )
-        else:
-            raise Exception(result.stderr)
-            
+        parts = relative_str.lower().replace(' ago', '').split(', ')
+        delta = timedelta()
+        for part in parts:
+            number, unit = part.split(' ')
+            number = int(number)
+            if 'minute' in unit:
+                delta += timedelta(minutes=number)
+            elif 'second' in unit:
+                delta += timedelta(seconds=number)
+            elif 'hour' in unit:
+                delta += timedelta(hours=number)
+            elif 'day' in unit:
+                delta += timedelta(days=number)
+            elif 'week' in unit:
+                delta += timedelta(weeks=number)
+            elif 'month' in unit:
+                delta += timedelta(days=30 * number)
+            elif 'year' in unit:
+                delta += timedelta(days=365 * number)
+        return datetime.now(pytz.UTC) - delta
     except Exception as e:
-        logger.error(f"Error generating key for user {user_id}: {e}")
-        keyboard = InlineKeyboardMarkup(row_width=1)
-        keyboard.add(
-            InlineKeyboardButton("« Главное меню", callback_data="main_menu")
-        )
-        await callback_query.message.edit_text(
-            "Ошибка при получении ключа. Попробуйте позже или обратитесь в поддержку.",
-            reply_markup=keyboard
-        )
+        logger.error(f"Ошибка при парсинге относительного времени '{relative_str}': {e}")
+        return None
 
 @dp.message_handler(commands=['start', 'help'])
 async def help_command_handler(message: types.Message):
@@ -557,7 +439,7 @@ async def client_selected_callback(callback_query: types.CallbackQuery):
     _, username = callback_query.data.split('client_', 1)
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
-        InlineKeyboardButton("Получить конфигурацию", callback_data=f"send_config_{username}"),
+        InlineKeyboardButton("Получить конфигурацию", callback_data=f"get_config_{username}"),
         InlineKeyboardButton("Удалить пользователя", callback_data=f"delete_{username}"),
         InlineKeyboardButton("« Назад", callback_data="list_users"),
         InlineKeyboardButton("« В главное меню", callback_data="return_home")
@@ -573,50 +455,25 @@ async def list_users_callback(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
         await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
         return
-
+        
     clients = db.get_client_list()
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    
     if not clients:
-        keyboard.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
+        keyboard = InlineKeyboardMarkup().add(
+            InlineKeyboardButton("« Назад", callback_data="return_home")
+        )
         await callback_query.message.edit_text(
             "Список пользователей пуст.",
             reply_markup=keyboard
         )
         return
-
-    for client in clients:
-        username = client[0]
-        keyboard.add(InlineKeyboardButton(username, callback_data=f"client_{username}"))
+        
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    for username in clients:
+        keyboard.add(InlineKeyboardButton(username[0], callback_data=f"client_{username[0]}"))
     keyboard.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
     
     await callback_query.message.edit_text(
         "Выберите пользователя:",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data.startswith('delete_'))
-async def client_delete_callback(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
-        return
-        
-    _, username = callback_query.data.split('delete_', 1)
-    success = await deactivate_user(username)
-    
-    if success:
-        confirmation_text = f"Пользователь {username} успешно удален."
-    else:
-        confirmation_text = f"Не удалось удалить пользователя {username}."
-        
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("« Назад к списку", callback_data="list_users"),
-        InlineKeyboardButton("« В главное меню", callback_data="return_home")
-    )
-    
-    await callback_query.message.edit_text(
-        confirmation_text,
         reply_markup=keyboard
     )
 
@@ -713,428 +570,303 @@ async def ip_info_callback(callback_query: types.CallbackQuery):
         return
     await callback_query.answer()
 
+@dp.callback_query_handler(lambda c: c.data.startswith('delete_user_'))
+async def client_delete_callback(callback_query: types.CallbackQuery):
+    username = callback_query.data.split('delete_user_')[1]
+    success = db.deactive_user_db(username)
+    if success:
+        db.remove_user_expiration(username)
+        try:
+            scheduler.remove_job(job_id=username)
+        except:
+            pass
+        user_dir = os.path.join('users', username)
+        try:
+            if os.path.exists(user_dir):
+                shutil.rmtree(user_dir)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении директории для пользователя {username}: {e}")
+        confirmation_text = f"Пользователь **{username}** успешно удален."
+    else:
+        confirmation_text = f"Не удалось удалить пользователя **{username}**."
+    main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
+    main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
+    if main_chat_id and main_message_id:
+        await bot.edit_message_text(
+            chat_id=main_chat_id,
+            message_id=main_message_id,
+            text=confirmation_text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu_markup(callback_query.from_user.id)
+        )
+    else:
+        await callback_query.answer("Ошибка: главное сообщение не найдено.", show_alert=True)
+        return
+    await callback_query.answer()
+
 @dp.callback_query_handler(lambda c: c.data == 'home')
 async def return_home(callback_query: types.CallbackQuery):
     markup = get_main_menu_markup(callback_query.from_user.id)
-    await callback_query.message.edit_text(
-        "Главное меню:",
-        reply_markup=markup
-    )
+    main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
+    main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
 
-@dp.callback_query_handler(lambda c: c.data == 'admin_menu')
-async def admin_menu(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
-        return
-
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("Список пользователей", callback_data="list_users"),
-        InlineKeyboardButton("Создать пользователя", callback_data="create_user"),
-        InlineKeyboardButton("Создать бэкап", callback_data="create_backup"),
-        InlineKeyboardButton("« Назад", callback_data="return_home")
-    )
-    await callback_query.message.edit_text(
-        "Панель администратора:",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data == 'list_users')
-async def list_users(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
-        return
-
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    clients = db.get_client_list()
-    
-    if not clients:
-        keyboard.add(InlineKeyboardButton("« Назад", callback_data="admin_menu"))
-        await callback_query.message.edit_text(
-            "Список пользователей пуст",
-            reply_markup=keyboard
-        )
-        return
-
-    for client in clients:
-        keyboard.add(InlineKeyboardButton(client[0], callback_data=f"user_info_{client[0]}"))
-    keyboard.add(InlineKeyboardButton("« Назад", callback_data="admin_menu"))
-    
-    await callback_query.message.edit_text(
-        "Выберите пользователя:",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data.startswith('user_info_'))
-async def user_info(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
-        return
-
-    username = callback_query.data.replace('user_info_', '')
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("Получить конфигурацию", callback_data=f"get_config_{username}"),
-        InlineKeyboardButton("Удалить пользователя", callback_data=f"delete_user_{username}"),
-        InlineKeyboardButton("« Назад к списку", callback_data="list_users"),
-        InlineKeyboardButton("« В главное меню", callback_data="return_home")
-    )
-    
-    await callback_query.message.edit_text(
-        f"Управление пользователем {username}:",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data.startswith('delete_user_'))
-async def delete_user(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
-        return
-
-    username = callback_query.data.replace('delete_user_', '')
-    success = await deactivate_user(username)
-    
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("« Назад к списку", callback_data="list_users"),
-        InlineKeyboardButton("« В главное меню", callback_data="return_home")
-    )
-    
-    if success:
-        text = f"Пользователь {username} успешно удален"
-    else:
-        text = f"Ошибка при удалении пользователя {username}"
-    
-    await callback_query.message.edit_text(text, reply_markup=keyboard)
-
-@dp.callback_query_handler(lambda c: c.data.startswith('get_config_'))
-async def get_user_config(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
-        return
-
-    username = callback_query.data.replace('get_config_', '')
-    try:
-        config = await generate_vpn_key(username)
-        keyboard = InlineKeyboardMarkup(row_width=1)
-        keyboard.add(
-            InlineKeyboardButton("« Назад к пользователю", callback_data=f"user_info_{username}"),
-            InlineKeyboardButton("« Назад к списку", callback_data="list_users"),
-            InlineKeyboardButton("« В главное меню", callback_data="return_home")
-        )
+    if main_chat_id and main_message_id:
+        user_main_messages[callback_query.from_user.id].pop('state', None)
+        user_main_messages[callback_query.from_user.id].pop('client_name', None)
+        user_main_messages[callback_query.from_user.id].pop('duration_choice', None)
+        user_main_messages[callback_query.from_user.id].pop('traffic_limit', None)
         
-        await callback_query.message.edit_text(
-            f"Конфигурация для {username}:\n\n{format_vpn_key(config)}",
-            reply_markup=keyboard
-        )
-    except Exception as e:
-        logger.error(f"Error generating config for {username}: {e}")
-        keyboard = InlineKeyboardMarkup(row_width=1)
-        keyboard.add(
-            InlineKeyboardButton("« Назад к пользователю", callback_data=f"user_info_{username}"),
-            InlineKeyboardButton("« В главное меню", callback_data="return_home")
-        )
-        await callback_query.message.edit_text(
-            "Ошибка при генерации конфигурации",
-            reply_markup=keyboard
-        )
-
-@dp.callback_query_handler(lambda c: c.data == 'create_user')
-async def create_user(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
-        return
-
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(InlineKeyboardButton("« Назад", callback_data="admin_menu"))
-    
-    await callback_query.message.edit_text(
-        "Введите имя нового пользователя:",
-        reply_markup=keyboard
-    )
-    user_states[callback_query.from_user.id] = "awaiting_username"
-
-@dp.callback_query_handler(lambda c: c.data == 'user_menu')
-async def user_menu(callback_query: types.CallbackQuery):
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("Мой ключ", callback_data="my_vpn_key"),
-        InlineKeyboardButton("Купить подписку", callback_data="buy_subscription"),
-        InlineKeyboardButton("« Назад", callback_data="return_home")
-    )
-    await callback_query.message.edit_text(
-        "Меню пользователя:",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data == 'my_vpn_key')
-async def show_vpn_key(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    client_name = f"user_{user_id}"
-    
-    try:
-        vpn_key = await generate_vpn_key(client_name)
-        keyboard = InlineKeyboardMarkup(row_width=1)
-        keyboard.add(
-            InlineKeyboardButton("« Назад", callback_data="user_menu"),
-            InlineKeyboardButton("« В главное меню", callback_data="return_home")
-        )
-        await callback_query.message.edit_text(
-            f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
-            "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
-            reply_markup=keyboard
-        )
-    except Exception as e:
-        logger.error(f"Error showing VPN key: {e}")
-        keyboard = InlineKeyboardMarkup(row_width=1)
-        keyboard.add(
-            InlineKeyboardButton("« Назад", callback_data="user_menu"),
-            InlineKeyboardButton("« В главное меню", callback_data="return_home")
-        )
-        await callback_query.message.edit_text(
-            "Ошибка при получении ключа. Пожалуйста, попробуйте позже или обратитесь в поддержку.",
-            reply_markup=keyboard
-        )
-
-@dp.callback_query_handler(lambda c: c.data == 'payment_history')
-async def payment_history_callback(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен")
-        return
-        
-    payments = db.get_all_payments()
-    message_text = "История платежей:\n\n"
-    
-    for user_id, user_payments in payments.items():
-        for payment in user_payments:
-            timestamp = datetime.fromisoformat(payment['timestamp'])
-            message_text += (
-                f"Пользователь: {user_id}\n"
-                f"ID платежа: {payment['payment_id']}\n"
-                f"Сумма: {payment['amount']} RUB\n"
-                f"Статус: {payment['status']}\n"
-                f"Дата: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            )
-    
-    keyboard = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("« Назад", callback_data="return_home")
-    )
-    
-    await callback_query.message.edit_text(
-        message_text if message_text != "История платежей:\n\n" else "История платежей пуста",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data == 'mass_message')
-async def mass_message_prompt(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен")
-        return
-        
-    await callback_query.message.edit_text(
-        "Отправьте сообщение, которое нужно разослать всем пользователям:",
-        reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton("« Назад", callback_data="return_home")
-        )
-    )
-    
-    user_states[callback_query.from_user.id] = "waiting_for_mass_message"
-
-async def process_mass_message(message: types.Message):
-    if message.from_user.id != admin:
-        return
-        
-    payments = db.get_all_payments()
-    user_ids = set(int(user_id) for user_id in payments.keys())
-    
-    sent_count = 0
-    for user_id in user_ids:
         try:
-            await bot.send_message(user_id, message.text)
-            sent_count += 1
-        except Exception as e:
-            logger.error(f"Failed to send message to user {user_id}: {e}")
-    
-    await message.reply(
-        f"Сообщение отправлено {sent_count} пользователям",
-        reply_markup=get_main_menu_markup(message.from_user.id)
-    )
-    
-    user_states.pop(message.from_user.id, None)
-
-@dp.message_handler()
-async def handle_messages(message: types.Message):
-    user_id = message.from_user.id
-    state = user_states.get(user_id)
-    
-    if state == "waiting_for_mass_message":
-        await process_mass_message(message)
-        return
-        
-    await message.reply("Неизвестная команда или действие.")
-    asyncio.create_task(delete_message_after_delay(message.chat.id, message.message_id, delay=2))
-
-async def create_payment(user_id: int, period: str) -> dict:
-    amount = PAYMENT_AMOUNTS[period]
-    payment = Payment.create({
-        "amount": {
-            "value": str(amount),
-            "currency": "RUB"
-        },
-        "confirmation": {
-            "type": "redirect",
-            "return_url": f"https://t.me/AmneziaVPNIZbot"
-        },
-        "capture": True,
-        "description": f"VPN подписка на {period.split('_')[0]} месяц(ев)",
-        "metadata": {
-            "user_id": user_id,
-            "period": period
-        }
-    })
-    
-    db.add_payment(user_id, payment.id, amount)
-    return payment.confirmation.confirmation_url
-
-@dp.callback_query_handler(lambda c: c.data == 'buy_vpn')
-async def buy_vpn_callback(callback_query: types.CallbackQuery):
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("1 месяц - 500₽", callback_data="pay_1_month"),
-        InlineKeyboardButton("3 месяца - 1200₽", callback_data="pay_3_months"),
-        InlineKeyboardButton("6 месяцев - 2000₽", callback_data="pay_6_months"),
-        InlineKeyboardButton("12 месяцев - 3500₽", callback_data="pay_12_months"),
-        InlineKeyboardButton("« Назад", callback_data="return_home")
-    )
-    await callback_query.message.edit_text(
-        "Выберите период подписки:",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data.startswith('pay_'))
-async def handle_payment(callback_query: types.CallbackQuery):
-    period = callback_query.data.replace('pay_', '')
-    payment_url = await create_payment(callback_query.from_user.id, period)
-    
-    keyboard = InlineKeyboardMarkup()
-    keyboard.add(
-        InlineKeyboardButton("Оплатить", url=payment_url),
-        InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{period}"),
-        InlineKeyboardButton("« Назад", callback_data="buy_vpn")
-    )
-    
-    await callback_query.message.edit_text(
-        "Для оплаты нажмите кнопку ниже. После оплаты нажмите 'Проверить оплату' "
-        "для получения вашего VPN ключа.",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
-async def check_payment_status(callback_query: types.CallbackQuery):
-    period = callback_query.data.replace('check_payment_', '')
-    user_id = callback_query.from_user.id
-    
-    payments = db.get_user_payments(user_id)
-    if not payments:
-        await callback_query.answer("Платеж не найден", show_alert=True)
-        return
-
-    latest_payment = payments[-1]
-    payment_id = latest_payment['payment_id']
-    
-    try:
-        payment = Payment.find_one(payment_id)
-        
-        if payment.status == 'succeeded':
-            db.update_payment_status(payment_id, 'succeeded')
-            
-            client_name = f"user_{user_id}"
+            await bot.edit_message_text(
+                chat_id=main_chat_id,
+                message_id=main_message_id,
+                text="Выберите действие:",
+                reply_markup=markup
+            )
+        except:
+            sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=markup)
+            user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
             try:
-                config = db.get_config()
-                endpoint = config.get('endpoint', '')
-                wg_config = config.get('wg_config', '')
-                container = config.get('container', '')
-                
-                result = subprocess.run(
-                    ['bash', 'awg/newclient.sh', client_name, endpoint, wg_config, container],
-                    capture_output=True,
-                    text=True
-                )
-                
-                if result.returncode == 0:
-                    vpn_key = result.stdout.strip()
-                    keyboard = InlineKeyboardMarkup()
-                    keyboard.add(
-                        InlineKeyboardButton("« В главное меню", callback_data="return_home")
-                    )
-                    
-                    await callback_query.message.edit_text(
-                        f"Оплата успешна! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
-                        "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
-                        reply_markup=keyboard
-                    )
-                else:
-                    logger.error(f"Error generating VPN key: {result.stderr}")
-                    raise Exception(f"Failed to generate VPN key: {result.stderr}")
-                    
-            except Exception as e:
-                logger.error(f"Error generating VPN key after payment: {e}")
-                await bot.send_message(
-                    user_id,
-                    "Произошла ошибка при генерации ключа. Пожалуйста, обратитесь в поддержку."
-                )
-                
-    except Exception as e:
-        logger.error(f"Error checking payment status: {e}")
-        await callback_query.answer(
-            "Произошла ошибка при проверке платежа. Попробуйте позже.",
-            show_alert=True
-        )
+                await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
+            except:
+                pass
+    else:
+        sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=markup)
+        user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
+        try:
+            await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
+        except:
+            pass
+    await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('retry_key_generation_'))
-async def retry_key_generation(callback_query: types.CallbackQuery):
-    user_id = int(callback_query.data.replace('retry_key_generation_', ''))
-    client_name = f"user_{user_id}"
-    
-    try:
-        config = db.get_config()
-        endpoint = config.get('endpoint', '')
-        wg_config = config.get('wg_config', '')
-        container = config.get('container', '')
-        
-        result = subprocess.run(
-            ['bash', 'awg/newclient.sh', client_name, endpoint, wg_config, container],
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode == 0:
-            vpn_key = result.stdout.strip()
-            keyboard = InlineKeyboardMarkup()
-            keyboard.add(
-                InlineKeyboardButton("« В главное меню", callback_data="return_home")
-            )
-            
-            await callback_query.message.edit_text(
-                f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
-                "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
-                reply_markup=keyboard
-            )
-        else:
-            logger.error(f"Error generating VPN key on retry: {result.stderr}")
-            raise Exception(f"Failed to generate VPN key: {result.stderr}")
-            
-    except Exception as e:
-        logger.error(f"Error generating VPN key on retry: {e}")
-        keyboard = InlineKeyboardMarkup()
-        keyboard.add(
-            InlineKeyboardButton("Попробовать снова", callback_data=f"retry_key_generation_{user_id}"),
-            InlineKeyboardButton("« В главное меню", callback_data="return_home")
-        )
-        await callback_query.message.edit_text(
-            "Произошла ошибка при генерации ключа. Пожалуйста, попробуйте позже или обратитесь в поддержку.",
+@dp.callback_query_handler(lambda c: c.data.startswith('get_config'))
+async def list_users_for_config(callback_query: types.CallbackQuery):
+    clients = db.get_client_list()
+    if not clients:
+        await callback_query.answer("Список пользователей пуст.", show_alert=True)
+        return
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    for client in clients:
+        username = client[0]
+        keyboard.insert(InlineKeyboardButton(username, callback_data=f"send_config_{username}"))
+    keyboard.add(InlineKeyboardButton("Домой", callback_data="home"))
+    main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
+    main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
+    if main_chat_id and main_message_id:
+        await bot.edit_message_text(
+            chat_id=main_chat_id,
+            message_id=main_message_id,
+            text="Выберите пользователя для получения конфигурации:",
             reply_markup=keyboard
         )
+    else:
+        sent_message = await callback_query.message.reply("Выберите пользователя для получения конфигурации:", reply_markup=keyboard)
+        user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
+        try:
+            await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
+        except:
+            pass
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('send_config_'))
+async def send_user_config(callback_query: types.CallbackQuery):
+    _, username = callback_query.data.split('send_config_', 1)
+    username = username.strip()
+    sent_messages = []
+    try:
+        user_dir = os.path.join('users', username)
+        conf_path = os.path.join(user_dir, f'{username}.conf')
+        if not os.path.exists(conf_path):
+            await callback_query.answer("Конфигурационный файл пользователя отсутствует. Возможно, пользователь был создан вручную, и его конфигурация недоступна.", show_alert=True)
+            return
+        if os.path.exists(conf_path):
+            vpn_key = await generate_vpn_key(conf_path)
+            if vpn_key:
+                instruction_text = (
+                    "\nAmneziaVPN [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn&hl=ru), "
+                    "[GitHub](https://github.com/amnezia-vpn/amnezia-client)"
+                )
+                formatted_key = format_vpn_key(vpn_key)
+                key_message = f"```\n{formatted_key}\n```"
+                caption = f"{instruction_text}\n{key_message}"
+            else:
+                caption = "VPN ключ не был сгенерирован."
+            with open(conf_path, 'rb') as config:
+                sent_doc = await bot.send_document(
+                    callback_query.from_user.id,
+                    config,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    disable_notification=True
+                )
+                sent_messages.append(sent_doc.message_id)
+        else:
+            confirmation_text = f"Не удалось создать конфигурацию для пользователя **{username}**."
+            sent_message = await bot.send_message(callback_query.from_user.id, confirmation_text, parse_mode="Markdown", disable_notification=True)
+            asyncio.create_task(delete_message_after_delay(callback_query.from_user.id, sent_message.message_id, delay=15))
+            await callback_query.answer()
+            return
+    except Exception as e:
+        confirmation_text = f"Произошла ошибка: {e}"
+        sent_message = await bot.send_message(callback_query.from_user.id, confirmation_text, parse_mode="Markdown", disable_notification=True)
+        asyncio.create_task(delete_message_after_delay(callback_query.from_user.id, sent_message.message_id, delay=15))
+        await callback_query.answer()
+        return
+    if not sent_messages:
+        confirmation_text = f"Не удалось найти файлы конфигурации для пользователя **{username}**."
+        sent_message = await bot.send_message(callback_query.from_user.id, confirmation_text, parse_mode="Markdown", disable_notification=True)
+        asyncio.create_task(delete_message_after_delay(callback_query.from_user.id, sent_message.message_id, delay=15))
+        await callback_query.answer()
+        return
+    else:
+        confirmation_text = f"Конфигурация для **{username}** отправлена."
+        sent_confirmation = await bot.send_message(
+            chat_id=callback_query.from_user.id,
+            text=confirmation_text,
+            parse_mode="Markdown",
+            disable_notification=True
+        )
+        asyncio.create_task(delete_message_after_delay(callback_query.from_user.id, sent_confirmation.message_id, delay=15))
+    for message_id in sent_messages:
+        asyncio.create_task(delete_message_after_delay(callback_query.from_user.id, message_id, delay=15))
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('create_backup'))
+async def create_backup_callback(callback_query: types.CallbackQuery):
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    backup_filename = f"backup_{date_str}.zip"
+    backup_filepath = os.path.join(os.getcwd(), backup_filename)
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, create_zip, backup_filepath)
+        if os.path.exists(backup_filepath):
+            with open(backup_filepath, 'rb') as f:
+                await bot.send_document(callback_query.from_user.id, f, caption=backup_filename, disable_notification=True)
+            os.remove(backup_filepath)
+        else:
+            logger.error(f"Бекап файл не создан: {backup_filepath}")
+            await bot.send_message(callback_query.from_user.id, "Не удалось создать бекап.", disable_notification=True)
+    except Exception as e:
+        logger.error(f"Ошибка при создании бекапа: {e}")
+        await bot.send_message(callback_query.from_user.id, "Не удалось создать бекап.", disable_notification=True)
+    await callback_query.answer()
+
+def parse_transfer(transfer_str):
+    try:
+        if '/' in transfer_str:
+            incoming, outgoing = transfer_str.split('/')
+            incoming = incoming.strip()
+            outgoing = outgoing.strip()
+            incoming_match = re.match(r'([\d.]+)\s*(\w+)', incoming)
+            outgoing_match = re.match(r'([\d.]+)\s*(\w+)', outgoing)
+            def convert_to_bytes(value, unit):
+                size_map = {
+                    'B': 1,
+                    'KB': 10**3,
+                    'KiB': 1024,
+                    'MB': 10**6,
+                    'MiB': 1024**2,
+                    'GB': 10**9,
+                    'GiB': 1024**3,
+                }
+                return float(value) * size_map.get(unit, 1)
+            incoming_bytes = convert_to_bytes(*incoming_match.groups()) if incoming_match else 0
+            outgoing_bytes = convert_to_bytes(*outgoing_match.groups()) if outgoing_match else 0
+            return incoming_bytes, outgoing_bytes
+        else:
+            parts = re.split(r'[/,]', transfer_str)
+            if len(parts) >= 2:
+                incoming = parts[0].strip()
+                outgoing = parts[1].strip()
+                incoming_match = re.match(r'([\d.]+)\s*(\w+)', incoming)
+                outgoing_match = re.match(r'([\d.]+)\s*(\w+)', outgoing)
+                def convert_to_bytes(value, unit):
+                    size_map = {
+                        'B': 1,
+                        'KB': 10**3,
+                        'KiB': 1024,
+                        'MB': 10**6,
+                        'MiB': 1024**2,
+                        'GB': 10**9,
+                        'GiB': 1024**3,
+                    }
+                    return float(value) * size_map.get(unit, 1)
+                incoming_bytes = convert_to_bytes(*incoming_match.groups()) if incoming_match else 0
+                outgoing_bytes = convert_to_bytes(*outgoing_match.groups()) if outgoing_match else 0
+                return incoming_bytes, outgoing_bytes
+            else:
+                return 0, 0
+    except Exception as e:
+        logger.error(f"Ошибка при парсинге трафика: {e}")
+        return 0, 0
+
+def humanize_bytes(bytes_value):
+    return humanize.naturalsize(bytes_value, binary=False)
+
+async def read_traffic(username):
+    traffic_file = os.path.join('users', username, 'traffic.json')
+    os.makedirs(os.path.dirname(traffic_file), exist_ok=True)
+    if not os.path.exists(traffic_file):
+        traffic_data = {
+            "total_incoming": 0,
+            "total_outgoing": 0,
+            "last_incoming": 0,
+            "last_outgoing": 0
+        }
+        async with aiofiles.open(traffic_file, 'w') as f:
+            await f.write(json.dumps(traffic_data))
+        return traffic_data
+    else:
+        async with aiofiles.open(traffic_file, 'r') as f:
+            content = await f.read()
+            try:
+                traffic_data = json.loads(content)
+                return traffic_data
+            except json.JSONDecodeError:
+                logger.error(f"Ошибка при чтении traffic.json для пользователя {username}. Инициализация заново.")
+                traffic_data = {
+                    "total_incoming": 0,
+                    "total_outgoing": 0,
+                    "last_incoming": 0,
+                    "last_outgoing": 0
+                }
+                async with aiofiles.open(traffic_file, 'w') as f_write:
+                    await f_write.write(json.dumps(traffic_data))
+                return traffic_data
+
+async def update_traffic(username, incoming_bytes, outgoing_bytes):
+    traffic_data = await read_traffic(username)
+    delta_incoming = incoming_bytes - traffic_data.get('last_incoming', 0)
+    delta_outgoing = outgoing_bytes - traffic_data.get('last_outgoing', 0)
+    if delta_incoming < 0:
+        delta_incoming = 0
+    if delta_outgoing < 0:
+        delta_outgoing = 0
+    traffic_data['total_incoming'] += delta_incoming
+    traffic_data['total_outgoing'] += delta_outgoing
+    traffic_data['last_incoming'] = incoming_bytes
+    traffic_data['last_outgoing'] = outgoing_bytes
+    traffic_file = os.path.join('users', username, 'traffic.json')
+    async with aiofiles.open(traffic_file, 'w') as f:
+        await f.write(json.dumps(traffic_data))
+    return traffic_data
+
+async def update_all_clients_traffic():
+    logger.info("Начало обновления трафика для всех клиентов.")
+    active_clients = db.get_active_list()
+    for client in active_clients:
+        username = client[0]
+        transfer = client[2]
+        incoming_bytes, outgoing_bytes = parse_transfer(transfer)
+        traffic_data = await update_traffic(username, incoming_bytes, outgoing_bytes)
+        logger.info(f"Обновлён трафик для пользователя {username}: Входящий {traffic_data['total_incoming']} B, Исходящий {traffic_data['total_outgoing']} B")
+        traffic_limit = db.get_user_traffic_limit(username)
+        if traffic_limit != "Неограниченно":
+            limit_bytes = parse_traffic_limit(traffic_limit)
+            total_bytes = traffic_data.get('total_incoming', 0) + traffic_data.get('total_outgoing', 0)
+            if total_bytes >= limit_bytes:
+                await deactivate_user(username)
+    logger.info("Завершено обновление трафика для всех клиентов.")
 
 async def generate_vpn_key(conf_path: str) -> str:
     try:
@@ -1243,123 +975,246 @@ async def on_shutdown(dp):
     scheduler.shutdown()
     logger.info("Планировщик остановлен.")
 
-async def update_traffic(username, incoming_bytes, outgoing_bytes):
-    traffic_data = await read_traffic(username)
-    delta_incoming = incoming_bytes - traffic_data.get('last_incoming', 0)
-    delta_outgoing = outgoing_bytes - traffic_data.get('last_outgoing', 0)
-    if delta_incoming < 0:
-        delta_incoming = 0
-    if delta_outgoing < 0:
-        delta_outgoing = 0
-    traffic_data['total_incoming'] += delta_incoming
-    traffic_data['total_outgoing'] += delta_outgoing
-    traffic_data['last_incoming'] = incoming_bytes
-    traffic_data['last_outgoing'] = outgoing_bytes
-    traffic_file = os.path.join('users', username, 'traffic.json')
-    async with aiofiles.open(traffic_file, 'w') as f:
-        await f.write(json.dumps(traffic_data))
-    return traffic_data
-
-async def update_all_clients_traffic():
-    logger.info("Начало обновления трафика для всех клиентов.")
-    active_clients = db.get_active_list()
-    for client in active_clients:
-        username = client[0]
-        transfer = client[2]
-        incoming_bytes, outgoing_bytes = parse_transfer(transfer)
-        traffic_data = await update_traffic(username, incoming_bytes, outgoing_bytes)
-        logger.info(f"Обновлён трафик для пользователя {username}: Входящий {traffic_data['total_incoming']} B, Исходящий {traffic_data['total_outgoing']} B")
-        traffic_limit = db.get_user_traffic_limit(username)
-        if traffic_limit != "Неограниченно":
-            limit_bytes = parse_traffic_limit(traffic_limit)
-            total_bytes = traffic_data.get('total_incoming', 0) + traffic_data.get('total_outgoing', 0)
-            if total_bytes >= limit_bytes:
-                await deactivate_user(username)
-    logger.info("Завершено обновление трафика для всех клиентов.")
-
-def parse_transfer(transfer_str):
-    try:
-        if '/' in transfer_str:
-            incoming, outgoing = transfer_str.split('/')
-            incoming = incoming.strip()
-            outgoing = outgoing.strip()
-            incoming_match = re.match(r'^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$', incoming, re.IGNORECASE)
-            outgoing_match = re.match(r'^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$', outgoing, re.IGNORECASE)
-            def convert_to_bytes(value, unit):
-                size_map = {
-                    'B': 1,
-                    'KB': 10**3,
-                    'KiB': 1024,
-                    'MB': 10**6,
-                    'MiB': 1024**2,
-                    'GB': 10**9,
-                    'GiB': 1024**3,
-                }
-                return float(value) * size_map.get(unit, 1)
-            incoming_bytes = convert_to_bytes(*incoming_match.groups()) if incoming_match else 0
-            outgoing_bytes = convert_to_bytes(*outgoing_match.groups()) if outgoing_match else 0
-            return incoming_bytes, outgoing_bytes
-        else:
-            parts = re.split(r'[/,]', transfer_str)
-            if len(parts) >= 2:
-                incoming = parts[0].strip()
-                outgoing = parts[1].strip()
-                incoming_match = re.match(r'^(\d+(?:\.\d+)?)\s*(\w+)$', incoming)
-                outgoing_match = re.match(r'^(\d+(?:\.\d+)?)\s*(\w+)$', outgoing)
-                def convert_to_bytes(value, unit):
-                    size_map = {
-                        'B': 1,
-                        'KB': 10**3,
-                        'KiB': 1024,
-                        'MB': 10**6,
-                        'MiB': 1024**2,
-                        'GB': 10**9,
-                        'GiB': 1024**3,
-                    }
-                    return float(value) * size_map.get(unit, 1)
-                incoming_bytes = convert_to_bytes(*incoming_match.groups()) if incoming_match else 0
-                outgoing_bytes = convert_to_bytes(*outgoing_match.groups()) if outgoing_match else 0
-                return incoming_bytes, outgoing_bytes
-            else:
-                return 0, 0
-    except Exception as e:
-        logger.error(f"Ошибка при парсинге трафика: {e}")
-        return 0, 0
-
-def humanize_bytes(bytes_value):
-    return humanize.naturalsize(bytes_value, binary=False)
-
-async def read_traffic(username):
-    traffic_file = os.path.join('users', username, 'traffic.json')
-    os.makedirs(os.path.dirname(traffic_file), exist_ok=True)
-    if not os.path.exists(traffic_file):
-        traffic_data = {
-            "total_incoming": 0,
-            "total_outgoing": 0,
-            "last_incoming": 0,
-            "last_outgoing": 0
+async def create_payment(user_id: int, period: str) -> dict:
+    amount = PAYMENT_AMOUNTS[period]
+    payment = Payment.create({
+        "amount": {
+            "value": str(amount),
+            "currency": "RUB"
+        },
+        "confirmation": {
+            "type": "redirect",
+            "return_url": f"https://t.me/AmneziaVPNIZbot"
+        },
+        "capture": True,
+        "description": f"VPN подписка на {period.split('_')[0]} месяц(ев)",
+        "metadata": {
+            "user_id": user_id,
+            "period": period
         }
-        async with aiofiles.open(traffic_file, 'w') as f:
-            await f.write(json.dumps(traffic_data))
-        return traffic_data
-    else:
-        async with aiofiles.open(traffic_file, 'r') as f:
-            content = await f.read()
-            try:
-                traffic_data = json.loads(content)
-                return traffic_data
-            except json.JSONDecodeError:
-                logger.error(f"Ошибка при чтении traffic.json для пользователя {username}. Инициализация заново.")
-                traffic_data = {
-                    "total_incoming": 0,
-                    "total_outgoing": 0,
-                    "last_incoming": 0,
-                    "last_outgoing": 0
-                }
-                async with aiofiles.open(traffic_file, 'w') as f_write:
-                    await f_write.write(json.dumps(traffic_data))
-                return traffic_data
+    })
+    
+    db.add_payment(user_id, payment.id, amount)
+    return payment.confirmation.confirmation_url
 
+@dp.callback_query_handler(lambda c: c.data == 'buy_vpn')
+async def buy_vpn_callback(callback_query: types.CallbackQuery):
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton("1 месяц - 500₽", callback_data="pay_1_month"),
+        InlineKeyboardButton("3 месяца - 1200₽", callback_data="pay_3_months"),
+        InlineKeyboardButton("6 месяцев - 2000₽", callback_data="pay_6_months"),
+        InlineKeyboardButton("12 месяцев - 3500₽", callback_data="pay_12_months"),
+        InlineKeyboardButton("« Назад", callback_data="return_home")
+    )
+    await callback_query.message.edit_text(
+        "Выберите период подписки:",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('pay_'))
+async def handle_payment(callback_query: types.CallbackQuery):
+    period = callback_query.data.replace('pay_', '')
+    payment_url = await create_payment(callback_query.from_user.id, period)
+    
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(
+        InlineKeyboardButton("Оплатить", url=payment_url),
+        InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{period}"),
+        InlineKeyboardButton("« Назад", callback_data="buy_vpn")
+    )
+    
+    await callback_query.message.edit_text(
+        "Для оплаты нажмите кнопку ниже. После оплаты нажмите 'Проверить оплату' "
+        "для получения вашего VPN ключа.",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
+async def check_payment_status(callback_query: types.CallbackQuery):
+    period = callback_query.data.replace('check_payment_', '')
+    user_id = callback_query.from_user.id
+    
+    # Get user's latest payment
+    payments = db.get_user_payments(user_id)
+    if not payments:
+        await callback_query.answer("Платеж не найден", show_alert=True)
+        return
+
+    latest_payment = payments[-1]
+    payment_id = latest_payment['payment_id']
+    
+    try:
+        # Check payment status in YooKassa
+        payment = Payment.find_one(payment_id)
+        
+        if payment.status == 'succeeded':
+            # Update payment status in database
+            db.update_payment_status(payment_id, 'succeeded')
+            
+            # Generate VPN key for user
+            client_name = f"user_{user_id}"
+            try:
+                vpn_key = await generate_vpn_key(client_name)
+                keyboard = InlineKeyboardMarkup()
+                keyboard.add(
+                    InlineKeyboardButton("« В главное меню", callback_data="return_home")
+                )
+                
+                await callback_query.message.edit_text(
+                    f"Оплата успешна! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+                    "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.error(f"Error generating VPN key: {e}")
+                await callback_query.answer(
+                    "Произошла ошибка при генерации ключа. Пожалуйста, обратитесь в поддержку.",
+                    show_alert=True
+                )
+        elif payment.status == 'pending':
+            await callback_query.answer(
+                "Оплата еще не поступила. Пожалуйста, подождите или попробуйте позже.",
+                show_alert=True
+            )
+        else:
+            await callback_query.answer(
+                f"Статус платежа: {payment.status}. Попробуйте оплатить снова.",
+                show_alert=True
+            )
+    except Exception as e:
+        logger.error(f"Error checking payment status: {e}")
+        await callback_query.answer(
+            "Произошла ошибка при проверке платежа. Попробуйте позже.",
+            show_alert=True
+        )
+
+@dp.callback_query_handler(lambda c: c.data == 'my_vpn_key')
+async def my_vpn_key_callback(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    payments = db.get_user_payments(user_id)
+    active_payments = [p for p in payments if p['status'] == 'succeeded']
+    
+    if not active_payments:
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(InlineKeyboardButton("Купить VPN", callback_data="buy_vpn"))
+        keyboard.add(InlineKeyboardButton("« Назад", callback_data="return_home"))
+        await callback_query.message.edit_text(
+            "У вас нет активного VPN ключа. Для получения ключа необходимо приобрести подписку.",
+            reply_markup=keyboard
+        )
+        return
+
+    # Get or generate VPN key
+    client_name = f"user_{user_id}"
+    vpn_key = None
+    try:
+        vpn_key = await generate_vpn_key(client_name)
+    except Exception as e:
+        logger.error(f"Error generating VPN key: {e}")
+        await callback_query.message.edit_text(
+            "Произошла ошибка при генерации ключа. Пожалуйста, попробуйте позже или обратитесь в поддержку.",
+            reply_markup=InlineKeyboardMarkup().add(
+                InlineKeyboardButton("« Назад", callback_data="return_home")
+            )
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton("Обновить ключ", callback_data="regenerate_key"),
+        InlineKeyboardButton("Удалить ключ", callback_data="delete_key"),
+        InlineKeyboardButton("« Назад", callback_data="return_home")
+    )
+    
+    await callback_query.message.edit_text(
+        f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+        "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query_handler(lambda c: c.data == 'payment_history')
+async def payment_history_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен")
+        return
+        
+    payments = db.get_all_payments()
+    message_text = "История платежей:\n\n"
+    
+    for user_id, user_payments in payments.items():
+        for payment in user_payments:
+            timestamp = datetime.fromisoformat(payment['timestamp'])
+            message_text += (
+                f"Пользователь: {user_id}\n"
+                f"ID платежа: {payment['payment_id']}\n"
+                f"Сумма: {payment['amount']} RUB\n"
+                f"Статус: {payment['status']}\n"
+                f"Дата: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            )
+    
+    keyboard = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("« Назад", callback_data="return_home")
+    )
+    
+    await callback_query.message.edit_text(
+        message_text if message_text != "История платежей:\n\n" else "История платежей пуста",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query_handler(lambda c: c.data == 'mass_message')
+async def mass_message_prompt(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен")
+        return
+        
+    await callback_query.message.edit_text(
+        "Отправьте сообщение, которое нужно разослать всем пользователям:",
+        reply_markup=InlineKeyboardMarkup().add(
+            InlineKeyboardButton("« Назад", callback_data="return_home")
+        )
+    )
+    
+    # Set state for next message
+    user_states[callback_query.from_user.id] = "waiting_for_mass_message"
+
+async def process_mass_message(message: types.Message):
+    if message.from_user.id != admin:
+        return
+        
+    # Get all unique user IDs from payments
+    payments = db.get_all_payments()
+    user_ids = set(int(user_id) for user_id in payments.keys())
+    
+    sent_count = 0
+    for user_id in user_ids:
+        try:
+            await bot.send_message(user_id, message.text)
+            sent_count += 1
+        except Exception as e:
+            logger.error(f"Failed to send message to user {user_id}: {e}")
+    
+    await message.reply(
+        f"Сообщение отправлено {sent_count} пользователям",
+        reply_markup=get_main_menu_markup(message.from_user.id)
+    )
+    
+    # Clear state
+    user_states.pop(message.from_user.id, None)
+
+# Update message handler to handle mass messaging
+@dp.message_handler()
+async def handle_messages(message: types.Message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    
+    if state == "waiting_for_mass_message":
+        await process_mass_message(message)
+        return
+        
+    # ... rest of the existing handle_messages function ...
+
+# Webhook handler for YooKassa payment notifications
 async def handle_payment_notification(request):
     try:
         payment_data = await request.json()
@@ -1369,32 +1224,19 @@ async def handle_payment_notification(request):
             user_id = payment.metadata.get('user_id')
             period = payment.metadata.get('period')
             
+            # Update payment status in database
             db.update_payment_status(payment.id, 'succeeded')
             
+            # Generate VPN key for user
             client_name = f"user_{user_id}"
             try:
-                config = db.get_config()
-                endpoint = config.get('endpoint', '')
-                wg_config = config.get('wg_config', '')
-                container = config.get('container', '')
-                
-                result = subprocess.run(
-                    ['bash', 'awg/newclient.sh', client_name, endpoint, wg_config, container],
-                    capture_output=True,
-                    text=True
+                vpn_key = await generate_vpn_key(client_name)
+                # Send VPN key to user
+                await bot.send_message(
+                    user_id,
+                    f"Спасибо за оплату! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+                    "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN."
                 )
-                
-                if result.returncode == 0:
-                    vpn_key = result.stdout.strip()
-                    await bot.send_message(
-                        user_id,
-                        f"Спасибо за оплату! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
-                        "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN."
-                    )
-                else:
-                    logger.error(f"Error generating VPN key: {result.stderr}")
-                    raise Exception(f"Failed to generate VPN key: {result.stderr}")
-                    
             except Exception as e:
                 logger.error(f"Error generating VPN key after payment: {e}")
                 await bot.send_message(
