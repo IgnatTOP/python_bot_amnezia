@@ -243,54 +243,259 @@ async def load_isp_cache_task():
     await load_isp_cache()
     scheduler.add_job(cleanup_isp_cache, 'interval', hours=1)
 
-def create_zip(backup_filepath):
-    with zipfile.ZipFile(backup_filepath, 'w') as zipf:
-        for main_file in ['awg-decode.py', 'newclient.sh', 'removeclient.sh']:
-            if os.path.exists(main_file):
-                zipf.write(main_file, main_file)
-        for root, dirs, files in os.walk('files'):
-            for file in files:
-                filepath = os.path.join(root, file)
-                arcname = os.path.relpath(filepath, os.getcwd())
-                zipf.write(filepath, arcname)
-        for root, dirs, files in os.walk('users'):
-            for file in files:
-                filepath = os.path.join(root, file)
-                arcname = os.path.relpath(filepath, os.getcwd())
-                zipf.write(filepath, arcname)
-
-async def delete_message_after_delay(chat_id: int, message_id: int, delay: int):
-    await asyncio.sleep(delay)
+async def parse_transfer(transfer_str):
     try:
-        await bot.delete_message(chat_id, message_id)
-    except:
-        pass
-
-def parse_relative_time(relative_str: str) -> datetime:
-    try:
-        parts = relative_str.lower().replace(' ago', '').split(', ')
-        delta = timedelta()
-        for part in parts:
-            number, unit = part.split(' ')
-            number = int(number)
-            if 'minute' in unit:
-                delta += timedelta(minutes=number)
-            elif 'second' in unit:
-                delta += timedelta(seconds=number)
-            elif 'hour' in unit:
-                delta += timedelta(hours=number)
-            elif 'day' in unit:
-                delta += timedelta(days=number)
-            elif 'week' in unit:
-                delta += timedelta(weeks=number)
-            elif 'month' in unit:
-                delta += timedelta(days=30 * number)
-            elif 'year' in unit:
-                delta += timedelta(days=365 * number)
-        return datetime.now(pytz.UTC) - delta
+        if '/' in transfer_str:
+            incoming, outgoing = transfer_str.split('/')
+            incoming = incoming.strip()
+            outgoing = outgoing.strip()
+            incoming_match = re.match(r'([\d.]+)\s*(\w+)', incoming)
+            outgoing_match = re.match(r'([\d.]+)\s*(\w+)', outgoing)
+            
+            def convert_to_bytes(value, unit):
+                size_map = {
+                    'B': 1,
+                    'KB': 10**3,
+                    'KiB': 1024,
+                    'MB': 10**6,
+                    'MiB': 1024**2,
+                    'GB': 10**9,
+                    'GiB': 1024**3,
+                }
+                return float(value) * size_map.get(unit, 1)
+            
+            incoming_bytes = convert_to_bytes(*incoming_match.groups()) if incoming_match else 0
+            outgoing_bytes = convert_to_bytes(*outgoing_match.groups()) if outgoing_match else 0
+            return incoming_bytes, outgoing_bytes
     except Exception as e:
-        logger.error(f"Ошибка при парсинге относительного времени '{relative_str}': {e}")
-        return None
+        logger.error(f"Ошибка при парсинге трафика: {e}")
+        return 0, 0
+
+def humanize_bytes(bytes_value):
+    return humanize.naturalsize(bytes_value, binary=True)
+
+async def read_traffic(username):
+    traffic_file = os.path.join('users', username, 'traffic.json')
+    os.makedirs(os.path.dirname(traffic_file), exist_ok=True)
+    
+    if not os.path.exists(traffic_file):
+        traffic_data = {
+            "total_incoming": 0,
+            "total_outgoing": 0,
+            "last_incoming": 0,
+            "last_outgoing": 0
+        }
+        async with aiofiles.open(traffic_file, 'w') as f:
+            await f.write(json.dumps(traffic_data))
+        return traffic_data
+    
+    try:
+        async with aiofiles.open(traffic_file, 'r') as f:
+            content = await f.read()
+            return json.loads(content)
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        logger.error(f"Ошибка при чтении traffic.json для пользователя {username}: {e}")
+        traffic_data = {
+            "total_incoming": 0,
+            "total_outgoing": 0,
+            "last_incoming": 0,
+            "last_outgoing": 0
+        }
+        async with aiofiles.open(traffic_file, 'w') as f:
+            await f.write(json.dumps(traffic_data))
+        return traffic_data
+
+async def update_traffic(username, incoming_bytes, outgoing_bytes):
+    traffic_data = await read_traffic(username)
+    
+    delta_incoming = max(0, incoming_bytes - traffic_data.get('last_incoming', 0))
+    delta_outgoing = max(0, outgoing_bytes - traffic_data.get('last_outgoing', 0))
+    
+    traffic_data['total_incoming'] += delta_incoming
+    traffic_data['total_outgoing'] += delta_outgoing
+    traffic_data['last_incoming'] = incoming_bytes
+    traffic_data['last_outgoing'] = outgoing_bytes
+    
+    traffic_file = os.path.join('users', username, 'traffic.json')
+    async with aiofiles.open(traffic_file, 'w') as f:
+        await f.write(json.dumps(traffic_data))
+    
+    return traffic_data
+
+async def update_all_clients_traffic():
+    logger.info("Начало обновления трафика для всех клиентов")
+    active_clients = db.get_active_list()
+    
+    for client in active_clients:
+        username = client[0]
+        transfer = client[2]
+        incoming_bytes, outgoing_bytes = parse_transfer(transfer)
+        
+        try:
+            traffic_data = await update_traffic(username, incoming_bytes, outgoing_bytes)
+            logger.info(f"Обновлён трафик для {username}: ↓{humanize_bytes(traffic_data['total_incoming'])} ↑{humanize_bytes(traffic_data['total_outgoing'])}")
+            
+            # Проверяем лимит трафика
+            traffic_limit = db.get_user_traffic_limit(username)
+            if traffic_limit != "Неограниченно":
+                limit_bytes = parse_traffic_limit(traffic_limit)
+                total_bytes = traffic_data['total_incoming'] + traffic_data['total_outgoing']
+                
+                if total_bytes >= limit_bytes:
+                    logger.info(f"Пользователь {username} превысил лимит трафика. Деактивация...")
+                    await deactivate_user(username)
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении трафика для {username}: {e}")
+
+async def generate_vpn_key(conf_path: str) -> str:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            'python3.11',
+            'awg-decode.py',
+            '--encode',
+            conf_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"Ошибка awg-decode.py: {stderr.decode().strip()}")
+            return ""
+            
+        vpn_key = stdout.decode().strip()
+        if vpn_key.startswith('vpn://'):
+            return vpn_key
+        else:
+            logger.error(f"awg-decode.py вернул некорректный формат: {vpn_key}")
+            return ""
+    except Exception as e:
+        logger.error(f"Ошибка при генерации VPN ключа: {e}")
+        return ""
+
+async def deactivate_user(client_name: str):
+    success = db.deactive_user_db(client_name)
+    if success:
+        db.remove_user_expiration(client_name)
+        try:
+            scheduler.remove_job(job_id=client_name)
+        except:
+            pass
+            
+        # Удаляем файлы пользователя
+        user_dir = os.path.join('users', client_name)
+        try:
+            if os.path.exists(user_dir):
+                shutil.rmtree(user_dir)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении директории пользователя {client_name}: {e}")
+            
+        # Уведомляем админа
+        confirmation_text = f"🔴 Пользователь *{client_name}* деактивирован из-за превышения лимита трафика"
+        try:
+            sent_message = await bot.send_message(
+                admin,
+                confirmation_text,
+                parse_mode="Markdown",
+                disable_notification=True
+            )
+            asyncio.create_task(delete_message_after_delay(admin, sent_message.message_id, delay=15))
+        except Exception as e:
+            logger.error(f"Ошибка при отправке уведомления админу: {e}")
+    else:
+        logger.error(f"Не удалось деактивировать пользователя {client_name}")
+
+async def check_environment():
+    try:
+        # Проверяем наличие Docker контейнера
+        cmd = f"docker ps --filter 'name={DOCKER_CONTAINER}' --format '{{{{.Names}}}}'"
+        container_names = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
+        if DOCKER_CONTAINER not in container_names:
+            logger.error(f"Docker контейнер '{DOCKER_CONTAINER}' не найден")
+            return False
+            
+        # Проверяем наличие конфига WireGuard
+        cmd = f"docker exec {DOCKER_CONTAINER} test -f {WG_CONFIG_FILE}"
+        subprocess.check_call(cmd, shell=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Ошибка при проверке окружения: {e}")
+        return False
+
+async def periodic_ensure_peer_names():
+    db.ensure_peer_names()
+
+async def on_startup(dp):
+    # Создаём необходимые директории
+    os.makedirs('files/connections', exist_ok=True)
+    os.makedirs('users', exist_ok=True)
+    
+    # Загружаем кэш ISP
+    await load_isp_cache_task()
+    
+    # Проверяем окружение
+    environment_ok = await check_environment()
+    if not environment_ok:
+        logger.error("Необходима инициализация AmneziaVPN")
+        await bot.send_message(
+            admin,
+            "❌ Необходима инициализация AmneziaVPN перед запуском бота",
+            disable_notification=True
+        )
+        await bot.close()
+        sys.exit(1)
+    
+    # Запускаем планировщик
+    if not scheduler.running:
+        # Обновление трафика каждую минуту
+        scheduler.add_job(
+            update_all_clients_traffic,
+            IntervalTrigger(minutes=1),
+            id='traffic_update'
+        )
+        
+        # Синхронизация имён пиров каждую минуту
+        scheduler.add_job(
+            periodic_ensure_peer_names,
+            IntervalTrigger(minutes=1),
+            id='peer_names_sync'
+        )
+        
+        scheduler.start()
+        logger.info("Планировщик запущен")
+    
+    # Восстанавливаем задачи деактивации для пользователей с ограниченным временем
+    users = db.get_users_with_expiration()
+    for username, expiration_time, traffic_limit in users:
+        if expiration_time:
+            try:
+                expiration_dt = expiration_time if isinstance(expiration_time, datetime) else datetime.fromisoformat(expiration_time)
+                if expiration_dt.tzinfo is None:
+                    expiration_dt = expiration_dt.replace(tzinfo=pytz.UTC)
+                
+                if expiration_dt > datetime.now(pytz.UTC):
+                    scheduler.add_job(
+                        deactivate_user,
+                        trigger=DateTrigger(run_date=expiration_dt),
+                        args=[username],
+                        id=username
+                    )
+                    logger.info(f"Запланирована деактивация {username} на {expiration_dt}")
+                else:
+                    await deactivate_user(username)
+            except Exception as e:
+                logger.error(f"Ошибка при обработке пользователя {username}: {e}")
+
+async def on_shutdown(dp):
+    # Останавливаем планировщик
+    scheduler.shutdown()
+    logger.info("Планировщик остановлен")
+    
+    # Сохраняем кэш ISP
+    await save_isp_cache()
+    
+    # Закрываем соединение с ботом
+    await bot.close()
 
 @dp.message_handler(commands=['start', 'help'])
 async def help_command_handler(message: types.Message):
@@ -381,14 +586,30 @@ async def prompt_for_user_name(callback_query: types.CallbackQuery):
         await callback_query.answer("Ошибка: главное сообщение не найдено.", show_alert=True)
     await callback_query.answer()
 
-def parse_traffic_limit(traffic_limit: str) -> int:
-    mapping = {'B':1, 'KB':10**3, 'MB':10**6, 'GB':10**9, 'TB':10**12}
-    match = re.match(r'^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$', traffic_limit, re.IGNORECASE)
-    if match:
-        value = float(match.group(1))
-        unit = match.group(2).upper()
-        return int(value * mapping.get(unit, 1))
-    else:
+def parse_relative_time(relative_str: str) -> datetime:
+    try:
+        parts = relative_str.lower().replace(' ago', '').split(', ')
+        delta = timedelta()
+        for part in parts:
+            number, unit = part.split(' ')
+            number = int(number)
+            if 'minute' in unit:
+                delta += timedelta(minutes=number)
+            elif 'second' in unit:
+                delta += timedelta(seconds=number)
+            elif 'hour' in unit:
+                delta += timedelta(hours=number)
+            elif 'day' in unit:
+                delta += timedelta(days=number)
+            elif 'week' in unit:
+                delta += timedelta(weeks=number)
+            elif 'month' in unit:
+                delta += timedelta(days=30 * number)
+            elif 'year' in unit:
+                delta += timedelta(days=365 * number)
+        return datetime.now(pytz.UTC) - delta
+    except Exception as e:
+        logger.error(f"Ошибка при парсинге относительного времени '{relative_str}': {e}")
         return None
 
 @dp.callback_query_handler(lambda c: c.data.startswith('duration_'))
