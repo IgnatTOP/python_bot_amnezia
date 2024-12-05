@@ -597,40 +597,83 @@ async def ip_info_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == 'home')
 async def return_home(callback_query: types.CallbackQuery):
-    markup = get_main_menu_markup(callback_query.from_user.id)
-    main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
-    main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
+    try:
+        markup = get_main_menu_markup(callback_query.from_user.id)
+        await callback_query.message.edit_text(
+            "Главное меню:",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Error in return_home: {e}")
+        await callback_query.answer("Произошла ошибка при возврате в главное меню", show_alert=True)
 
-    if main_chat_id and main_message_id:
-        user_main_messages[callback_query.from_user.id].pop('state', None)
-        user_main_messages[callback_query.from_user.id].pop('client_name', None)
-        user_main_messages[callback_query.from_user.id].pop('duration_choice', None)
-        user_main_messages[callback_query.from_user.id].pop('traffic_limit', None)
+@dp.callback_query_handler(lambda c: c.data == 'admin_menu')
+async def admin_menu_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
         
-        try:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text="Выберите действие:",
-                reply_markup=markup
-            )
-        except:
-            sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=markup)
-            user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
-            try:
-                await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
-            except:
-                pass
-    else:
-        sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=markup)
-        user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
-        try:
-            await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
-        except:
-            pass
-    await callback_query.answer()
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton("Список пользователей", callback_data="list_users"),
+        InlineKeyboardButton("Создать пользователя", callback_data="create_user"),
+        InlineKeyboardButton("Создать бэкап", callback_data="create_backup"),
+        InlineKeyboardButton("« В главное меню", callback_data="return_home")
+    )
+    
+    await callback_query.message.edit_text(
+        "Меню администратора:",
+        reply_markup=keyboard
+    )
 
-@dp.callback_query_handler(lambda c: c.data.startswith('get_config'))
+@dp.callback_query_handler(lambda c: c.data == 'list_users')
+async def list_users_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+        
+    clients = db.get_client_list()
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    
+    if not clients:
+        keyboard.add(InlineKeyboardButton("« Назад", callback_data="admin_menu"))
+        await callback_query.message.edit_text(
+            "Список пользователей пуст.",
+            reply_markup=keyboard
+        )
+        return
+
+    for client in clients:
+        username = client[0]
+        keyboard.add(InlineKeyboardButton(username, callback_data=f"client_{username}"))
+    keyboard.add(InlineKeyboardButton("« Назад", callback_data="admin_menu"))
+    
+    await callback_query.message.edit_text(
+        "Выберите пользователя:",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('client_'))
+async def client_selected_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+        
+    _, username = callback_query.data.split('client_', 1)
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton("Получить конфигурацию", callback_data=f"send_config_{username}"),
+        InlineKeyboardButton("Удалить пользователя", callback_data=f"delete_{username}"),
+        InlineKeyboardButton("« Назад к списку", callback_data="list_users"),
+        InlineKeyboardButton("« В главное меню", callback_data="return_home")
+    )
+    
+    await callback_query.message.edit_text(
+        f"Действия с пользователем {username}:",
+        reply_markup=keyboard
+    )    
+
+@dp.callback_query_handler(lambda c: c.data == 'get_config')
 async def list_users_for_config(callback_query: types.CallbackQuery):
     clients = db.get_client_list()
     if not clients:
@@ -748,8 +791,8 @@ def parse_transfer(transfer_str):
             incoming, outgoing = transfer_str.split('/')
             incoming = incoming.strip()
             outgoing = outgoing.strip()
-            incoming_match = re.match(r'^(\d+(?:\.\d+)?)\s*(\w+)$', incoming)
-            outgoing_match = re.match(r'^(\d+(?:\.\d+)?)\s*(\w+)$', outgoing)
+            incoming_match = re.match(r'^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$', incoming, re.IGNORECASE)
+            outgoing_match = re.match(r'^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$', outgoing, re.IGNORECASE)
             def convert_to_bytes(value, unit):
                 size_map = {
                     'B': 1,
@@ -1043,25 +1086,38 @@ async def check_payment_status(callback_query: types.CallbackQuery):
             # Update payment status in database
             db.update_payment_status(payment_id, 'succeeded')
             
-            # Add license regardless of key generation success
-            license_data = db.add_license(user_id, period, payment_id)
-            expiration_date = datetime.fromisoformat(license_data['expiration_date'])
-            
-            # Try to generate VPN key
+            # Generate VPN key for user
             client_name = f"user_{user_id}"
             try:
-                vpn_key = await generate_vpn_key(client_name)
-                keyboard = InlineKeyboardMarkup()
-                keyboard.add(
-                    InlineKeyboardButton("« В главное меню", callback_data="return_home")
+                # Получаем параметры из конфига
+                config = db.get_config()
+                endpoint = config.get('endpoint', '')
+                wg_config = config.get('wg_config', '')
+                container = config.get('container', '')
+                
+                # Генерируем ключ
+                result = subprocess.run(
+                    ['bash', 'awg/newclient.sh', client_name, endpoint, wg_config, container],
+                    capture_output=True,
+                    text=True
                 )
                 
-                await callback_query.message.edit_text(
-                    f"Оплата успешна! Ваша подписка активна до {expiration_date.strftime('%d.%m.%Y')}\n\n"
-                    f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
-                    "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
-                    reply_markup=keyboard
-                )
+                if result.returncode == 0:
+                    vpn_key = result.stdout.strip()
+                    keyboard = InlineKeyboardMarkup()
+                    keyboard.add(
+                        InlineKeyboardButton("« В главное меню", callback_data="return_home")
+                    )
+                    
+                    await callback_query.message.edit_text(
+                        f"Оплата успешна! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+                        "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
+                        reply_markup=keyboard
+                    )
+                else:
+                    logger.error(f"Error generating VPN key: {result.stderr}")
+                    raise Exception(f"Failed to generate VPN key: {result.stderr}")
+                    
             except Exception as e:
                 logger.error(f"Error generating VPN key: {e}")
                 keyboard = InlineKeyboardMarkup()
@@ -1070,7 +1126,6 @@ async def check_payment_status(callback_query: types.CallbackQuery):
                     InlineKeyboardButton("« В главное меню", callback_data="return_home")
                 )
                 await callback_query.message.edit_text(
-                    f"Оплата успешна! Ваша подписка активна до {expiration_date.strftime('%d.%m.%Y')}\n\n"
                     "Произошла ошибка при генерации ключа. Пожалуйста, попробуйте позже или обратитесь в поддержку.",
                     reply_markup=keyboard
                 )
@@ -1094,28 +1149,38 @@ async def check_payment_status(callback_query: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith('retry_key_generation_'))
 async def retry_key_generation(callback_query: types.CallbackQuery):
     user_id = int(callback_query.data.replace('retry_key_generation_', ''))
-    
-    if not db.has_active_license(user_id):
-        await callback_query.answer("У вас нет активной подписки", show_alert=True)
-        return
-        
-    license_data = db.get_user_active_license(user_id)
-    expiration_date = datetime.fromisoformat(license_data['expiration_date'])
+    client_name = f"user_{user_id}"
     
     try:
-        client_name = f"user_{user_id}"
-        vpn_key = await generate_vpn_key(client_name)
-        keyboard = InlineKeyboardMarkup()
-        keyboard.add(
-            InlineKeyboardButton("« В главное меню", callback_data="return_home")
+        # Получаем параметры из конфига
+        config = db.get_config()
+        endpoint = config.get('endpoint', '')
+        wg_config = config.get('wg_config', '')
+        container = config.get('container', '')
+        
+        # Генерируем ключ
+        result = subprocess.run(
+            ['bash', 'awg/newclient.sh', client_name, endpoint, wg_config, container],
+            capture_output=True,
+            text=True
         )
         
-        await callback_query.message.edit_text(
-            f"Ваша подписка активна до {expiration_date.strftime('%d.%m.%Y')}\n\n"
-            f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
-            "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
-            reply_markup=keyboard
-        )
+        if result.returncode == 0:
+            vpn_key = result.stdout.strip()
+            keyboard = InlineKeyboardMarkup()
+            keyboard.add(
+                InlineKeyboardButton("« В главное меню", callback_data="return_home")
+            )
+            
+            await callback_query.message.edit_text(
+                f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+                "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
+                reply_markup=keyboard
+            )
+        else:
+            logger.error(f"Error generating VPN key on retry: {result.stderr}")
+            raise Exception(f"Failed to generate VPN key: {result.stderr}")
+            
     except Exception as e:
         logger.error(f"Error generating VPN key on retry: {e}")
         keyboard = InlineKeyboardMarkup()
@@ -1124,7 +1189,6 @@ async def retry_key_generation(callback_query: types.CallbackQuery):
             InlineKeyboardButton("« В главное меню", callback_data="return_home")
         )
         await callback_query.message.edit_text(
-            f"Ваша подписка активна до {expiration_date.strftime('%d.%m.%Y')}\n\n"
             "Произошла ошибка при генерации ключа. Пожалуйста, попробуйте позже или обратитесь в поддержку.",
             reply_markup=keyboard
         )    
@@ -1149,7 +1213,25 @@ async def my_vpn_key_callback(callback_query: types.CallbackQuery):
     client_name = f"user_{user_id}"
     vpn_key = None
     try:
-        vpn_key = await generate_vpn_key(client_name)
+        # Получаем параметры из конфига
+        config = db.get_config()
+        endpoint = config.get('endpoint', '')
+        wg_config = config.get('wg_config', '')
+        container = config.get('container', '')
+        
+        # Генерируем ключ
+        result = subprocess.run(
+            ['bash', 'awg/newclient.sh', client_name, endpoint, wg_config, container],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            vpn_key = result.stdout.strip()
+        else:
+            logger.error(f"Error generating VPN key: {result.stderr}")
+            raise Exception(f"Failed to generate VPN key: {result.stderr}")
+            
     except Exception as e:
         logger.error(f"Error generating VPN key: {e}")
         await callback_query.message.edit_text(
@@ -1270,13 +1352,31 @@ async def handle_payment_notification(request):
             # Generate VPN key for user
             client_name = f"user_{user_id}"
             try:
-                vpn_key = await generate_vpn_key(client_name)
-                # Send VPN key to user
-                await bot.send_message(
-                    user_id,
-                    f"Спасибо за оплату! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
-                    "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN."
+                # Получаем параметры из конфига
+                config = db.get_config()
+                endpoint = config.get('endpoint', '')
+                wg_config = config.get('wg_config', '')
+                container = config.get('container', '')
+                
+                # Генерируем ключ
+                result = subprocess.run(
+                    ['bash', 'awg/newclient.sh', client_name, endpoint, wg_config, container],
+                    capture_output=True,
+                    text=True
                 )
+                
+                if result.returncode == 0:
+                    vpn_key = result.stdout.strip()
+                    # Send VPN key to user
+                    await bot.send_message(
+                        user_id,
+                        f"Спасибо за оплату! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+                        "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN."
+                    )
+                else:
+                    logger.error(f"Error generating VPN key: {result.stderr}")
+                    raise Exception(f"Failed to generate VPN key: {result.stderr}")
+                    
             except Exception as e:
                 logger.error(f"Error generating VPN key after payment: {e}")
                 await bot.send_message(
