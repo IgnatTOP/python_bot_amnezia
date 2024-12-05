@@ -226,7 +226,7 @@ clone_repository() {
         return 0
     fi
     
-    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git awg-docker-bot"
+    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git python_bot_amnezia"
     cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
 }
 
