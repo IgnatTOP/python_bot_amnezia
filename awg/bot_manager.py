@@ -66,7 +66,24 @@ scheduler.start()
 
 dp.middleware.setup(AdminMessageDeletionMiddleware())
 
-main_menu_markup = InlineKeyboardMarkup(row_width=1)
+def get_main_menu_markup(user_id):
+    markup = InlineKeyboardMarkup(row_width=1)
+    if user_id == admin:
+        markup.add(
+            InlineKeyboardButton("Добавить пользователя", callback_data="add_user"),
+            InlineKeyboardButton("Получить конфигурацию пользователя", callback_data="get_config"),
+            InlineKeyboardButton("Список клиентов", callback_data="list_users"),
+            InlineKeyboardButton("Создать бекап", callback_data="create_backup"),
+            InlineKeyboardButton("История платежей", callback_data="payment_history"),
+            InlineKeyboardButton("Отправить сообщение всем", callback_data="mass_message")
+        )
+    else:
+        markup.add(
+            InlineKeyboardButton("Купить VPN", callback_data="buy_vpn"),
+            InlineKeyboardButton("Мой VPN ключ", callback_data="my_vpn_key"),
+            InlineKeyboardButton("Помощь", callback_data="help")
+        )
+    return markup
 
 user_main_messages = {}
 isp_cache = {}
@@ -195,7 +212,8 @@ def parse_relative_time(relative_str: str) -> datetime:
 
 @dp.message_handler(commands=['start', 'help'])
 async def help_command_handler(message: types.Message):
-    sent_message = await message.answer("Выберите действие:")
+    markup = get_main_menu_markup(message.from_user.id)
+    sent_message = await message.answer("Выберите действие:", reply_markup=markup)
     user_main_messages[message.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
     try:
         await bot.pin_chat_message(chat_id=message.chat.id, message_id=sent_message.message_id, disable_notification=True)
@@ -406,7 +424,7 @@ async def set_traffic_limit(callback_query: types.CallbackQuery):
             chat_id=main_chat_id,
             message_id=main_message_id,
             text="Выберите действие:",
-            reply_markup=main_menu_markup
+            reply_markup=get_main_menu_markup(callback_query.from_user.id)
         )
     else:
         await callback_query.answer("Выберите действие:", show_alert=True)
@@ -709,38 +727,41 @@ async def client_delete_callback(callback_query: types.CallbackQuery):
             message_id=main_message_id,
             text=confirmation_text,
             parse_mode="Markdown",
-            reply_markup=main_menu_markup
+            reply_markup=get_main_menu_markup(callback_query.from_user.id)
         )
     else:
         await callback_query.answer("Ошибка: главное сообщение не найдено.", show_alert=True)
         return
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('home'))
+@dp.callback_query_handler(lambda c: c.data == 'home')
 async def return_home(callback_query: types.CallbackQuery):
+    markup = get_main_menu_markup(callback_query.from_user.id)
     main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
     main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
+
     if main_chat_id and main_message_id:
         user_main_messages[callback_query.from_user.id].pop('state', None)
         user_main_messages[callback_query.from_user.id].pop('client_name', None)
         user_main_messages[callback_query.from_user.id].pop('duration_choice', None)
         user_main_messages[callback_query.from_user.id].pop('traffic_limit', None)
+        
         try:
             await bot.edit_message_text(
                 chat_id=main_chat_id,
                 message_id=main_message_id,
                 text="Выберите действие:",
-                reply_markup=main_menu_markup
+                reply_markup=markup
             )
         except:
-            sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=main_menu_markup)
+            sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=markup)
             user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
             try:
                 await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
             except:
                 pass
     else:
-        sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=main_menu_markup)
+        sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=markup)
         user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
         try:
             await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
@@ -1245,7 +1266,7 @@ async def process_mass_message(message: types.Message):
     
     await message.reply(
         f"Сообщение отправлено {sent_count} пользователям",
-        reply_markup=main_menu_markup
+        reply_markup=get_main_menu_markup(message.from_user.id)
     )
     
     # Clear state
