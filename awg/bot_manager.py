@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from yookassa import Configuration, Payment
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,8 +35,10 @@ admin_id = setting.get('admin_id')
 wg_config_file = setting.get('wg_config_file')
 docker_container = setting.get('docker_container')
 endpoint = setting.get('endpoint')
+ukassa_shop_id = setting.get('ukassa_shop_id')
+ukassa_secret_key = setting.get('ukassa_secret_key')
 
-if not all([bot_token, admin_id, wg_config_file, docker_container, endpoint]):
+if not all([bot_token, admin_id, wg_config_file, docker_container, endpoint, ukassa_shop_id, ukassa_secret_key]):
     logger.error("Некоторые обязательные настройки отсутствуют в конфигурационном файле.")
     sys.exit(1)
 
@@ -43,6 +47,9 @@ admin = int(admin_id)
 WG_CONFIG_FILE = wg_config_file
 DOCKER_CONTAINER = docker_container
 ENDPOINT = endpoint
+
+Configuration.account_id = ukassa_shop_id
+Configuration.secret_key = ukassa_secret_key
 
 class AdminMessageDeletionMiddleware(BaseMiddleware):
     async def on_process_message(self, message: types.Message, data: dict):
@@ -1133,43 +1140,61 @@ async def buy_vpn(callback_query: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith('purchase_'))
 async def process_purchase(callback_query: types.CallbackQuery):
     try:
-        # Получаем период из callback_data
         period = '_'.join(callback_query.data.split('_')[1:])
-        
         if period not in PRICES:
             raise KeyError(f"Неверный период: {period}")
             
         price = PRICES[period]
         months = int(period.split('_')[0])
-        payment_id = f"pay_{callback_query.from_user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         
-        # Сохраняем информацию о платеже
-        db.add_payment(callback_query.from_user.id, payment_id, price)
+        payment_id = str(uuid.uuid4())
+        
+        payment = Payment.create({
+            "amount": {
+                "value": str(price),
+                "currency": "RUB"
+            },
+            "confirmation": {
+                "type": "redirect",
+                "return_url": f"https://t.me/{(await bot.me).username}"
+            },
+            "capture": True,
+            "description": f"Оплата VPN на {months} {'месяц' if months == 1 else 'месяцев'}",
+            "metadata": {
+                "user_id": callback_query.from_user.id,
+                "months": months
+            }
+        })
+        
+        db.add_payment(callback_query.from_user.id, payment.id, price)
         
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(
-            InlineKeyboardButton("Подтвердить оплату", callback_data=f"confirm_payment_{payment_id}_{months}"),
+            InlineKeyboardButton("Оплатить", url=payment.confirmation.confirmation_url),
+            InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{payment.id}_{months}"),
             InlineKeyboardButton("Отмена", callback_data="buy_vpn")
         )
         
         await callback_query.message.edit_text(
-            f"К оплате: ${price}\n"
-            f"Период: {months} {'месяц' if months == 1 else 'месяцев'}\n"
-            f"ID платежа: {payment_id}\n\n"
-            "После оплаты нажмите кнопку подтверждения:",
+            f"Подписка на {months} {'месяц' if months == 1 else 'месяцев'}\n"
+            f"Сумма к оплате: {price} RUB\n\n"
+            "1. Нажмите кнопку «Оплатить»\n"
+            "2. Оплатите счет\n"
+            "3. Вернитесь в бот и нажмите «Проверить оплату»",
             reply_markup=markup
         )
+        
     except Exception as e:
         logger.error(f"Ошибка в process_purchase: {str(e)}")
         await callback_query.message.edit_text(
-            "Произошла ошибка при обработке запроса. Попробуйте снова.",
+            "Произошла ошибка при создании платежа. Попробуйте снова.",
             reply_markup=InlineKeyboardMarkup().add(
                 InlineKeyboardButton("Назад", callback_data="buy_vpn")
             )
         )
 
-@dp.callback_query_handler(lambda c: c.data.startswith('confirm_payment_'))
-async def confirm_payment(callback_query: types.CallbackQuery):
+@dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
+async def check_payment(callback_query: types.CallbackQuery):
     try:
         payment_data = callback_query.data.split('_')
         if len(payment_data) < 4:
@@ -1178,33 +1203,50 @@ async def confirm_payment(callback_query: types.CallbackQuery):
         payment_id = payment_data[2]
         months = int(payment_data[3])
         
-        # Обновляем статус платежа
-        db.update_payment_status(payment_id, 'completed')
+        payment = Payment.find_one(payment_id)
         
-        # Генерируем ключ для пользователя
-        user_id = callback_query.from_user.id
-        client_name = f"user_{user_id}"
-        
-        # Устанавливаем срок действия
-        expiration_date = datetime.now(pytz.UTC) + timedelta(days=30 * months)
-        db.set_user_expiration(client_name, expiration_date, "Неограниченно")
-        
-        # Создаем конфигурацию
-        await root_add(user_id)
-        
-        markup = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("Получить ключ", callback_data="my_key"),
-            InlineKeyboardButton("Главное меню", callback_data="return_user_menu")
-        )
-        
-        await callback_query.message.edit_text(
-            "Оплата подтверждена! Ваш VPN-ключ готов.",
-            reply_markup=markup
-        )
+        if payment.status == "succeeded":
+            db.update_payment_status(payment_id, 'completed')
+            
+            user_id = callback_query.from_user.id
+            client_name = f"user_{user_id}"
+            
+            expiration_date = datetime.now(pytz.UTC) + timedelta(days=30 * months)
+            db.set_user_expiration(client_name, expiration_date, "Неограниченно")
+            
+            await root_add(user_id)
+            
+            markup = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("Получить ключ", callback_data="my_key"),
+                InlineKeyboardButton("Главное меню", callback_data="return_user_menu")
+            )
+            
+            await callback_query.message.edit_text(
+                "Оплата прошла успешно! Ваш VPN-ключ готов.",
+                reply_markup=markup
+            )
+        elif payment.status == "pending":
+            markup = InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                InlineKeyboardButton("Оплатить", url=payment.confirmation.confirmation_url),
+                InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{payment_id}_{months}"),
+                InlineKeyboardButton("Отмена", callback_data="buy_vpn")
+            )
+            await callback_query.message.edit_text(
+                "Оплата еще не поступила. Если вы уже оплатили, подождите немного и нажмите «Проверить оплату» снова.",
+                reply_markup=markup
+            )
+        else:
+            await callback_query.message.edit_text(
+                "Платеж не удался или был отменен. Попробуйте снова.",
+                reply_markup=InlineKeyboardMarkup().add(
+                    InlineKeyboardButton("Попробовать снова", callback_data="buy_vpn")
+                )
+            )
     except Exception as e:
-        logger.error(f"Ошибка в confirm_payment: {str(e)}")
+        logger.error(f"Ошибка в check_payment: {str(e)}")
         await callback_query.message.edit_text(
-            "Произошла ошибка при подтверждении платежа. Обратитесь к администратору.",
+            "Произошла ошибка при проверке платежа. Попробуйте позже.",
             reply_markup=InlineKeyboardMarkup().add(
                 InlineKeyboardButton("Главное меню", callback_data="return_user_menu")
             )
@@ -1215,7 +1257,6 @@ async def show_user_key(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     client_name = f"user_{user_id}"
     
-    # Проверяем наличие активной подписки
     expiration = db.get_user_expiration(client_name)
     if not expiration or datetime.now(pytz.UTC) > expiration:
         markup = InlineKeyboardMarkup().add(
@@ -1228,7 +1269,6 @@ async def show_user_key(callback_query: types.CallbackQuery):
         )
         return
     
-    # Получаем конфигурацию пользователя
     config_path = f"files/clients/{client_name}.conf"
     if os.path.exists(config_path):
         async with aiofiles.open(config_path, 'r') as f:
@@ -1238,7 +1278,6 @@ async def show_user_key(callback_query: types.CallbackQuery):
             InlineKeyboardButton("Назад", callback_data="return_user_menu")
         )
         
-        # Отправляем конфигурацию в виде файла
         with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
             temp_file.write(config)
             temp_file_path = temp_file.name

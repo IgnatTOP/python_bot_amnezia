@@ -35,6 +35,8 @@ def create_config(path='files/setting.ini'):
 
     bot_token = input('Введите токен Telegram бота: ').strip()
     admin_id = input('Введите Telegram ID администратора: ').strip()
+    ukassa_shop_id = input('Введите Shop ID ЮKassa: ').strip()
+    ukassa_secret_key = input('Введите Secret Key ЮKassa: ').strip()
 
     docker_container = get_amnezia_container()
     logger.info(f"Найден Docker-контейнер: {docker_container}")
@@ -61,6 +63,8 @@ def create_config(path='files/setting.ini'):
     config.set("setting", "docker_container", docker_container)
     config.set("setting", "wg_config_file", wg_config_file)
     config.set("setting", "endpoint", endpoint)
+    config.set("setting", "ukassa_shop_id", ukassa_shop_id)
+    config.set("setting", "ukassa_secret_key", ukassa_secret_key)
 
     with open(path, "w") as config_file:
         config.write(config_file)
