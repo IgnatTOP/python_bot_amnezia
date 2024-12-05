@@ -432,100 +432,109 @@ async def set_traffic_limit(callback_query: types.CallbackQuery):
         await callback_query.answer("Выберите действие:", show_alert=True)
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('client_'))
-async def client_selected_callback(callback_query: types.CallbackQuery):
+@dp.callback_query_handler(lambda c: c.data.startswith('client_selected_'))
+async def client_selected_callback(callback_query: types.CallbackQuery, client_name=None):
     if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        await callback_query.answer("Доступ запрещен")
         return
-        
-    _, username = callback_query.data.split('client_', 1)
+
+    if client_name is None:
+        client_name = callback_query.data.replace('client_selected_', '')
+    
+    update_navigation_history(callback_query.from_user.id, f"client_selected_{client_name}")
+    
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
-        InlineKeyboardButton("Получить конфигурацию", callback_data=f"get_config_{username}"),
-        InlineKeyboardButton("Удалить пользователя", callback_data=f"delete_{username}"),
-        get_back_button("list_users"),
-        get_back_button("return_home")
+        InlineKeyboardButton("🔑 Получить конфиг", callback_data=f"get_config_{client_name}"),
+        InlineKeyboardButton("🔄 Активные подключения", callback_data=f"connections_{client_name}"),
+        InlineKeyboardButton("❌ Удалить пользователя", callback_data=f"delete_{client_name}")
     )
     
+    nav_buttons = get_navigation_buttons(callback_query.from_user.id, f"client_selected_{client_name}")
+    for button in nav_buttons.inline_keyboard:
+        keyboard.add(*button)
+    
     await callback_query.message.edit_text(
-        f"Действия с пользователем {username}:",
+        f"Выбран пользователь: {client_name}\nВыберите действие:",
         reply_markup=keyboard
     )
 
-user_navigation_history = {}
-
-def get_navigation_buttons(user_id: int, current_state: str):
-    keyboard = InlineKeyboardMarkup(row_width=2)
+@dp.callback_query_handler(lambda c: c.data.startswith('list_users'))
+async def list_users_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("Доступ запрещен")
+        return
     
-    if user_id in user_navigation_history and user_navigation_history[user_id]:
-        keyboard.add(InlineKeyboardButton(
-            "« Назад",
-            callback_data=f"nav_back_{current_state}"
-        ))
+    update_navigation_history(callback_query.from_user.id, "list_users")
     
-    keyboard.add(InlineKeyboardButton(
-        "🏠 Главное меню",
-        callback_data="return_home"
-    ))
+    clients = db.get_client_list()
+    keyboard = InlineKeyboardMarkup(row_width=1)
     
-    return keyboard
-
-def update_navigation_history(user_id: int, current_state: str):
-    if user_id not in user_navigation_history:
-        user_navigation_history[user_id] = []
+    if not clients:
+        nav_buttons = get_navigation_buttons(callback_query.from_user.id, "list_users")
+        for button in nav_buttons.inline_keyboard:
+            keyboard.add(*button)
+        
+        await callback_query.message.edit_text(
+            "Список пользователей пуст",
+            reply_markup=keyboard
+        )
+        return
     
-    if not user_navigation_history[user_id] or user_navigation_history[user_id][-1] != current_state:
-        user_navigation_history[user_id].append(current_state)
+    for client in clients:
+        keyboard.add(
+            InlineKeyboardButton(
+                f"👤 {client[0]}",
+                callback_data=f"client_selected_{client[0]}"
+            )
+        )
     
-    if len(user_navigation_history[user_id]) > 10:
-        user_navigation_history[user_id] = user_navigation_history[user_id][-10:]
+    nav_buttons = get_navigation_buttons(callback_query.from_user.id, "list_users")
+    for button in nav_buttons.inline_keyboard:
+        keyboard.add(*button)
+    
+    await callback_query.message.edit_text(
+        "Выберите пользователя:",
+        reply_markup=keyboard
+    )
 
 @dp.callback_query_handler(lambda c: c.data.startswith('nav_back_'))
 async def handle_navigation_back(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     current_state = callback_query.data.replace('nav_back_', '')
     
-    if user_id in user_navigation_history and user_navigation_history[user_id]:
-        if user_navigation_history[user_id] and user_navigation_history[user_id][-1] == current_state:
+    try:
+        if user_id in user_navigation_history and len(user_navigation_history[user_id]) > 1:
+            # Удаляем текущее состояние
             user_navigation_history[user_id].pop()
-        
-        if user_navigation_history[user_id]:
+            
+            # Получаем предыдущее состояние
             previous_state = user_navigation_history[user_id][-1]
+            
+            # Вызываем соответствующий обработчик
             if previous_state == "main_menu":
                 await return_home(callback_query)
             elif previous_state == "list_users":
                 await list_users_callback(callback_query)
             elif previous_state == "payment_history":
                 await payment_history_callback(callback_query)
+            elif previous_state.startswith("client_selected_"):
+                # Извлекаем имя клиента из истории состояний
+                client_name = previous_state.split('_')[-1]
+                await client_selected_callback(callback_query, client_name)
+            else:
+                # Если состояние неизвестно, возвращаемся на главную
+                await return_home(callback_query)
+        else:
+            # Если истории нет, возвращаемся на главную
+            await return_home(callback_query)
+            
+    except Exception as e:
+        logging.error(f"Error in handle_navigation_back: {e}")
+        await callback_query.answer("Произошла ошибка при навигации")
+        return
     
     await callback_query.answer()
-
-@dp.callback_query_handler(lambda c: c.data.startswith('list_users'))
-async def list_users_callback(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
-        return
-        
-    update_navigation_history(callback_query.from_user.id, "list_users")
-    
-    clients = db.get_client_list()
-    if not clients:
-        keyboard = InlineKeyboardMarkup().add(
-            get_back_button()
-        )
-        await callback_query.message.edit_text("Список клиентов пуст", reply_markup=keyboard)
-        return
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    for client in clients:
-        keyboard.insert(InlineKeyboardButton(client[0], callback_data=f"client_{client[0]}"))
-    nav_buttons = get_navigation_buttons(callback_query.from_user.id, "list_users")
-    for button in nav_buttons.inline_keyboard:
-        keyboard.add(*button)
-
-    await callback_query.message.edit_text(
-        "Выберите пользователя:",
-        reply_markup=keyboard
-    )
 
 @dp.callback_query_handler(lambda c: c.data.startswith('connections_'))
 async def client_connections_callback(callback_query: types.CallbackQuery):
@@ -547,7 +556,7 @@ async def client_connections_callback(callback_query: types.CallbackQuery):
             connections_text += f"{ip} ({isp}) - {timestamp}\n"
         keyboard = InlineKeyboardMarkup(row_width=2)
         keyboard.add(
-            get_back_button(f"client_{username}"),
+            get_back_button(f"client_selected_{username}"),
             get_back_button("home")
         )
         await bot.edit_message_text(
@@ -597,7 +606,7 @@ async def ip_info_callback(callback_query: types.CallbackQuery):
         info_text += f"{key.capitalize()}: {value}\n"
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
-        get_back_button(f"client_{username}"),
+        get_back_button(f"client_selected_{username}"),
         get_back_button("home")
     )
     main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
@@ -656,37 +665,29 @@ async def client_delete_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == 'home')
 async def return_home(callback_query: types.CallbackQuery):
-    markup = get_main_menu_markup(callback_query.from_user.id)
-    main_chat_id = user_main_messages.get(callback_query.from_user.id, {}).get('chat_id')
-    main_message_id = user_main_messages.get(callback_query.from_user.id, {}).get('message_id')
-
-    if main_chat_id and main_message_id:
-        user_main_messages[callback_query.from_user.id].pop('state', None)
-        user_main_messages[callback_query.from_user.id].pop('client_name', None)
-        user_main_messages[callback_query.from_user.id].pop('duration_choice', None)
-        user_main_messages[callback_query.from_user.id].pop('traffic_limit', None)
-        
-        try:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text="Выберите действие:",
-                reply_markup=markup
-            )
-        except:
-            sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=markup)
-            user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
-            try:
-                await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
-            except:
-                pass
-    else:
-        sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=markup)
-        user_main_messages[callback_query.from_user.id] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
-        try:
-            await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
-        except:
-            pass
+    user_id = callback_query.from_user.id
+    
+    # Очищаем историю навигации при возврате на главную
+    if user_id in user_navigation_history:
+        user_navigation_history[user_id] = ["main_menu"]
+    
+    markup = get_main_menu_markup(user_id)
+    try:
+        await callback_query.message.edit_text(
+            "Выберите действие:",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logging.error(f"Error in return_home: {e}")
+        sent_message = await callback_query.message.answer(
+            "Выберите действие:",
+            reply_markup=markup
+        )
+        user_main_messages[user_id] = {
+            'chat_id': sent_message.chat.id,
+            'message_id': sent_message.message_id
+        }
+    
     await callback_query.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('get_config'))
