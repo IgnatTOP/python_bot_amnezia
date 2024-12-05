@@ -219,14 +219,14 @@ install_and_configure_needrestart() {
 }
 
 clone_repository() {
-    if [[ -d "awg-docker-bot" ]]; then
+    if [[ -d "python_bot_amnezia" ]]; then
         echo -e "\n${YELLOW}Репозиторий существует${NC}"
-        cd awg-docker-bot || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+        cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
         return 0
     fi
     
-    run_with_spinner "Клонирование репозитория" "git clone https://github.com/JB-SelfCompany/awg-docker-bot.git >/dev/null 2>&1"
-    cd awg-docker-bot || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git >/dev/null 2>&1"
+    cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
 }
 
 setup_venv() {
