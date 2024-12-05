@@ -24,7 +24,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from yookassa import Configuration, Payment
-import uuid
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -35,10 +35,8 @@ admin_id = setting.get('admin_id')
 wg_config_file = setting.get('wg_config_file')
 docker_container = setting.get('docker_container')
 endpoint = setting.get('endpoint')
-ukassa_shop_id = setting.get('ukassa_shop_id')
-ukassa_secret_key = setting.get('ukassa_secret_key')
 
-if not all([bot_token, admin_id, wg_config_file, docker_container, endpoint, ukassa_shop_id, ukassa_secret_key]):
+if not all([bot_token, admin_id, wg_config_file, docker_container, endpoint]):
     logger.error("Некоторые обязательные настройки отсутствуют в конфигурационном файле.")
     sys.exit(1)
 
@@ -48,9 +46,15 @@ WG_CONFIG_FILE = wg_config_file
 DOCKER_CONTAINER = docker_container
 ENDPOINT = endpoint
 
-# Настройки ЮKassa
 Configuration.account_id = '993270'
 Configuration.secret_key = 'test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE'
+
+VPN_PRICES = {
+    '1': {'days': 30, 'price': 299},
+    '3': {'days': 90, 'price': 799},
+    '6': {'days': 180, 'price': 1499},
+    '12': {'days': 365, 'price': 2699}
+}
 
 class AdminMessageDeletionMiddleware(BaseMiddleware):
     async def on_process_message(self, message: types.Message, data: dict):
@@ -67,8 +71,7 @@ main_menu_markup = InlineKeyboardMarkup(row_width=1).add(
     InlineKeyboardButton("Добавить пользователя", callback_data="add_user"),
     InlineKeyboardButton("Получить конфигурацию пользователя", callback_data="get_config"),
     InlineKeyboardButton("Список клиентов", callback_data="list_users"),
-    InlineKeyboardButton("Создать бекап", callback_data="create_backup"),
-    InlineKeyboardButton("История платежей", callback_data="payment_history")
+    InlineKeyboardButton("Создать бекап", callback_data="create_backup")
 )
 
 user_main_messages = {}
@@ -77,19 +80,6 @@ ISP_CACHE_FILE = 'files/isp_cache.json'
 CACHE_TTL = timedelta(hours=24)
 
 TRAFFIC_LIMITS = ["5 GB", "10 GB", "30 GB", "100 GB", "Неограниченно"]
-
-PRICES = {
-    "1_month": 1000.00,  # 1 месяц - 1000 руб
-    "3_months": 2500.00,  # 3 месяца - 2500 руб
-    "6_months": 4500.00,  # 6 месяцев - 4500 руб
-    "12_months": 8000.00  # 12 месяцев - 8000 руб
-}
-
-user_menu_markup = InlineKeyboardMarkup(row_width=1).add(
-    InlineKeyboardButton("Купить VPN", callback_data="buy_vpn"),
-    InlineKeyboardButton("Мой ключ", callback_data="my_key"),
-    InlineKeyboardButton("Статус подписки", callback_data="subscription_status")
-)
 
 def get_interface_name():
     return os.path.basename(WG_CONFIG_FILE).split('.')[0]
@@ -209,13 +199,17 @@ def parse_relative_time(relative_str: str) -> datetime:
         logger.error(f"Ошибка при парсинге относительного времени '{relative_str}': {e}")
         return None
 
-@dp.message_handler(commands=['start'])
-async def start_command(message: types.Message):
-    user_id = message.from_user.id
-    if user_id == admin:
-        await message.answer("Добро пожаловать в панель администратора!", reply_markup=main_menu_markup)
+@dp.message_handler(commands=['start', 'help'])
+async def help_command_handler(message: types.Message):
+    if message.chat.id == admin:
+        sent_message = await message.answer("Выберите действие:", reply_markup=main_menu_markup)
+        user_main_messages[admin] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
+        try:
+            await bot.pin_chat_message(chat_id=message.chat.id, message_id=sent_message.message_id, disable_notification=True)
+        except:
+            pass
     else:
-        await message.answer("Добро пожаловать! Выберите действие:", reply_markup=user_menu_markup)
+        await message.answer("У вас нет доступа к этому боту.")
 
 @dp.message_handler()
 async def handle_messages(message: types.Message):
@@ -1126,235 +1120,172 @@ async def on_shutdown(dp):
     scheduler.shutdown()
     logger.info("Планировщик остановлен.")
 
-@dp.callback_query_handler(lambda c: c.data == 'buy_vpn')
-async def buy_vpn(callback_query: types.CallbackQuery):
-    markup = InlineKeyboardMarkup(row_width=2)
-    for period, price in PRICES.items():
-        months = period.split('_')[0]
-        markup.add(InlineKeyboardButton(
-            f"{months} {'месяц' if months == '1' else 'месяцев'} - {price} ₽",
-            callback_data=f"purchase_{period}"
+async def show_payment_options(message: types.Message):
+    keyboard = InlineKeyboardMarkup()
+    for period, details in VPN_PRICES.items():
+        button_text = f"{period} мес. - {details['price']}₽"
+        keyboard.add(InlineKeyboardButton(
+            text=button_text,
+            callback_data=f"buy_{period}"
         ))
-    markup.add(InlineKeyboardButton("Назад", callback_data="return_user_menu"))
-    await callback_query.message.edit_text("Выберите период подписки:", reply_markup=markup)
+    await message.answer("Выберите период подписки:", reply_markup=keyboard)
 
-@dp.callback_query_handler(lambda c: c.data.startswith('purchase_'))
-async def process_purchase(callback_query: types.CallbackQuery):
-    try:
-        period = '_'.join(callback_query.data.split('_')[1:])
-        if period not in PRICES:
-            raise KeyError(f"Неверный период: {period}")
-            
-        price = PRICES[period]
-        months = int(period.split('_')[0])
-        
-        payment = Payment.create({
-            "amount": {
-                "value": str(price),
-                "currency": "RUB"
-            },
-            "confirmation": {
-                "type": "redirect",
-                "return_url": f"https://t.me/{(await bot.me).username}"
-            },
-            "capture": True,
-            "description": f"Оплата VPN на {months} {'месяц' if months == 1 else 'месяцев'}",
-            "metadata": {
-                "user_id": callback_query.from_user.id,
-                "months": months
-            }
-        })
-        
-        # Сохраняем информацию о платеже
-        db.add_payment(callback_query.from_user.id, payment.id, price)
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            InlineKeyboardButton("Оплатить", url=payment.confirmation.confirmation_url),
-            InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{payment.id}_{months}"),
-            InlineKeyboardButton("Отмена", callback_data="buy_vpn")
-        )
-        
-        await callback_query.message.edit_text(
-            f"Подписка на {months} {'месяц' if months == 1 else 'месяцев'}\n"
-            f"Сумма к оплате: {price} ₽\n\n"
-            "1. Нажмите кнопку «Оплатить»\n"
-            "2. Оплатите счет\n"
-            "3. Вернитесь в бот и нажмите «Проверить оплату»",
-            reply_markup=markup
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка в process_purchase: {str(e)}")
-        await callback_query.message.edit_text(
-            "Произошла ошибка при создании платежа. Попробуйте снова.",
-            reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("Назад", callback_data="buy_vpn")
-            )
-        )
-
-@dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
-async def check_payment(callback_query: types.CallbackQuery):
-    try:
-        payment_data = callback_query.data.split('_')
-        if len(payment_data) < 4:
-            raise ValueError("Неверный формат данных платежа")
-            
-        payment_id = payment_data[2]
-        months = int(payment_data[3])
-        
-        payment = Payment.find_one(payment_id)
-        
-        if payment.status == "succeeded":
-            db.update_payment_status(payment_id, 'completed')
-            
-            user_id = callback_query.from_user.id
-            client_name = f"user_{user_id}"
-            
-            expiration_date = datetime.now(pytz.UTC) + timedelta(days=30 * months)
-            db.set_user_expiration(client_name, expiration_date, "Неограниченно")
-            
-            await root_add(user_id)
-            
-            markup = InlineKeyboardMarkup().add(
-                InlineKeyboardButton("Получить ключ", callback_data="my_key"),
-                InlineKeyboardButton("Главное меню", callback_data="return_user_menu")
-            )
-            
-            await callback_query.message.edit_text(
-                "Оплата прошла успешно! Ваш VPN-ключ готов.",
-                reply_markup=markup
-            )
-        elif payment.status == "pending":
-            markup = InlineKeyboardMarkup(row_width=1)
-            markup.add(
-                InlineKeyboardButton("Оплатить", url=payment.confirmation.confirmation_url),
-                InlineKeyboardButton("Проверить оплату", callback_data=f"check_payment_{payment_id}_{months}"),
-                InlineKeyboardButton("Отмена", callback_data="buy_vpn")
-            )
-            await callback_query.message.edit_text(
-                "Оплата еще не поступила. Если вы уже оплатили, подождите немного и нажмите «Проверить оплату» снова.",
-                reply_markup=markup
-            )
-        else:
-            await callback_query.message.edit_text(
-                "Платеж не удался или был отменен. Попробуйте снова.",
-                reply_markup=InlineKeyboardMarkup().add(
-                    InlineKeyboardButton("Попробовать снова", callback_data="buy_vpn")
-                )
-            )
-    except Exception as e:
-        logger.error(f"Ошибка в check_payment: {str(e)}")
-        await callback_query.message.edit_text(
-            "Произошла ошибка при проверке платежа. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("Главное меню", callback_data="return_user_menu")
-            )
-        )
-
-@dp.callback_query_handler(lambda c: c.data == 'my_key')
-async def show_user_key(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    client_name = f"user_{user_id}"
+async def process_payment(callback_query: types.CallbackQuery):
+    period = callback_query.data.split('_')[1]
+    price_info = VPN_PRICES[period]
     
-    expiration = db.get_user_expiration(client_name)
-    if not expiration or datetime.now(pytz.UTC) > expiration:
-        markup = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("Купить подписку", callback_data="buy_vpn"),
-            InlineKeyboardButton("Назад", callback_data="return_user_menu")
-        )
-        await callback_query.message.edit_text(
-            "У вас нет активной подписки. Приобретите подписку для получения ключа.",
-            reply_markup=markup
-        )
-        return
+    payment = Payment.create({
+        "amount": {
+            "value": str(price_info['price']),
+            "currency": "RUB"
+        },
+        "confirmation": {
+            "type": "redirect",
+            "return_url": f"https://t.me/{(await bot.me).username}"
+        },
+        "capture": True,
+        "description": f"VPN подписка на {period} мес.",
+        "metadata": {
+            "user_id": str(callback_query.from_user.id),
+            "period": period
+        }
+    })
     
-    config_path = f"files/clients/{client_name}.conf"
-    if os.path.exists(config_path):
-        async with aiofiles.open(config_path, 'r') as f:
-            config = await f.read()
-        
-        markup = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("Назад", callback_data="return_user_menu")
-        )
-        
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
-            temp_file.write(config)
-            temp_file_path = temp_file.name
-        
-        await bot.send_document(
-            callback_query.from_user.id,
-            types.InputFile(temp_file_path, filename=f"{client_name}.conf"),
-            caption="Ваш VPN-ключ",
-            reply_markup=markup
-        )
-        os.unlink(temp_file_path)
-    else:
-        await callback_query.message.edit_text(
-            "Ошибка: конфигурация не найдена. Обратитесь к администратору.",
-            reply_markup=InlineKeyboardMarkup().add(
-                InlineKeyboardButton("Назад", callback_data="return_user_menu")
-            )
-        )
-
-@dp.callback_query_handler(lambda c: c.data == 'subscription_status')
-async def show_subscription_status(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    client_name = f"user_{user_id}"
-    
-    expiration = db.get_user_expiration(client_name)
-    traffic_limit = db.get_user_traffic_limit(client_name)
-    
-    if expiration:
-        status_text = (
-            "Статус вашей подписки:\n\n"
-            f"Действительна до: {expiration.strftime('%d.%m.%Y %H:%M')}\n"
-            f"Лимит трафика: {traffic_limit}\n"
-        )
-        if datetime.now(pytz.UTC) > expiration:
-            status_text += "\nПодписка истекла. Необходимо продление."
-    else:
-        status_text = "У вас нет активной подписки."
-    
-    markup = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("Купить/Продлить", callback_data="buy_vpn"),
-        InlineKeyboardButton("Назад", callback_data="return_user_menu")
+    db.add_payment(
+        user_id=callback_query.from_user.id,
+        payment_id=payment.id,
+        amount=float(price_info['price'])
     )
     
-    await callback_query.message.edit_text(status_text, reply_markup=markup)
-
-@dp.callback_query_handler(lambda c: c.data == 'return_user_menu')
-async def return_to_user_menu(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text(
-        "Выберите действие:",
-        reply_markup=user_menu_markup
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton(
+        text="Оплатить",
+        url=payment.confirmation.confirmation_url
+    ))
+    
+    await callback_query.message.answer(
+        f"Для оплаты подписки на {period} мес. ({price_info['price']}₽) нажмите кнопку ниже:",
+        reply_markup=keyboard
     )
 
-@dp.callback_query_handler(lambda c: c.data == 'payment_history')
-async def show_payment_history(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
+async def check_payment(payment_id: str):
+    payment = Payment.find_one(payment_id)
+    if payment.status == "succeeded":
+        metadata = payment.metadata
+        user_id = int(metadata["user_id"])
+        period = metadata["period"]
+        
+        # Generate VPN key and configuration
+        username = f"user_{user_id}"
+        expiration_date = datetime.now(UTC) + timedelta(days=VPN_PRICES[period]['days'])
+        
+        await root_add(user_id)
+        db.set_user_expiration(username, expiration_date, "unlimited")
+        db.update_payment_status(payment_id, "completed")
+        
+        # Send configuration to user
+        await send_user_config(user_id, username)
+        await bot.send_message(
+            user_id,
+            f"Спасибо за оплату! Ваша подписка активирована на {period} мес.\n"
+            f"Срок действия до: {expiration_date.strftime('%d.%m.%Y')}"
+        )
+
+async def show_payment_history(message: types.Message):
+    if message.from_user.id != admin:
         return
-    
+        
     payments = db.get_all_payments()
     if not payments:
-        text = "История платежей пуста"
-    else:
-        text = "История платежей:\n\n"
-        for payment in payments:
-            user_id = payment['user_id']
-            status = payment['status']
-            amount = payment['amount']
-            date = datetime.fromisoformat(payment['timestamp']).strftime('%d.%m.%Y %H:%M')
-            text += f"Пользователь: {user_id}\n"
-            text += f"Сумма: ${amount}\n"
-            text += f"Статус: {status}\n"
-            text += f"Дата: {date}\n"
-            text += "-------------------\n"
+        await message.answer("История платежей пуста")
+        return
+        
+    text = "История платежей:\n\n"
+    for payment in payments:
+        status = "✅" if payment['status'] == 'completed' else "⏳"
+        text += f"ID: {payment['payment_id']}\n"
+        text += f"Пользователь: {payment['user_id']}\n"
+        text += f"Сумма: {payment['amount']}₽\n"
+        text += f"Статус: {status}\n"
+        text += f"Дата: {payment['timestamp']}\n\n"
     
-    markup = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("Назад", callback_data="return_home")
-    )
+    await message.answer(text)
+
+async def show_license_info(message: types.Message):
+    username = f"user_{message.from_user.id}"
+    expiration = db.get_user_expiration(username)
     
-    await callback_query.message.edit_text(text, reply_markup=markup)
+    if not expiration:
+        await message.answer(
+            "У вас нет активной подписки. Используйте команду /buy для покупки."
+        )
+        return
+    
+    expiration_date = datetime.fromtimestamp(expiration['expiration'], UTC)
+    days_left = (expiration_date - datetime.now(UTC)).days
+    
+    text = "Информация о вашей подписке:\n\n"
+    text += f"Статус: {'Активна' if days_left > 0 else 'Истекла'}\n"
+    text += f"Дата окончания: {expiration_date.strftime('%d.%m.%Y')}\n"
+    text += f"Осталось дней: {max(0, days_left)}\n"
+    
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton(
+        text="Продлить подписку",
+        callback_data="show_payment_options"
+    ))
+    
+    await message.answer(text, reply_markup=keyboard)
+
+dp.register_message_handler(show_payment_options, commands=['buy'])
+dp.register_message_handler(show_payment_history, commands=['payments'])
+dp.register_message_handler(show_license_info, commands=['license'])
+dp.register_callback_query_handler(process_payment, lambda c: c.data.startswith('buy_'))
+
+async def handle_yookassa_notification(request):
+    try:
+        data = await request.json()
+        if data['event'] == 'payment.succeeded':
+            payment_id = data['object']['id']
+            await check_payment(payment_id)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"Error processing YooKassa notification: {e}")
+        return web.Response(status=500)
+
+async def on_startup(dp):
+    app = web.Application()
+    app.router.add_post('/yookassa-webhook', handle_yookassa_notification)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, 'localhost', 8080)
+    await site.start()
+    
+    # Schedule tasks
+    scheduler.add_job(load_isp_cache_task, trigger=IntervalTrigger(hours=24))
+    scheduler.add_job(update_all_clients_traffic, trigger=IntervalTrigger(minutes=1))
+    scheduler.start()
+    logger.info("Планировщик запущен для обновления трафика каждые 5 минут.")
+    users = db.get_users_with_expiration()
+    for user in users:
+        client_name, expiration_time, traffic_limit = user
+        if expiration_time:
+            try:
+                expiration_datetime = datetime.fromisoformat(expiration_time)
+            except ValueError:
+                logger.error(f"Некорректный формат даты для пользователя {client_name}: {expiration_time}")
+                continue
+            if expiration_datetime.tzinfo is None:
+                expiration_datetime = expiration_datetime.replace(tzinfo=pytz.UTC)
+            if expiration_datetime > datetime.now(pytz.UTC):
+                scheduler.add_job(
+                    deactivate_user,
+                    trigger=DateTrigger(run_date=expiration_datetime),
+                    args=[client_name],
+                    id=client_name
+                )
+                logger.info(f"Запланирована деактивация пользователя {client_name} на {expiration_datetime}")
+            else:
+                await deactivate_user(client_name)
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)
