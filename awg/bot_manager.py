@@ -1202,13 +1202,19 @@ async def buy_vpn_callback(callback_query: types.CallbackQuery):
         InlineKeyboardButton("1 месяц - 500₽", callback_data="pay_1_month"),
         InlineKeyboardButton("3 месяца - 1200₽", callback_data="pay_3_months"),
         InlineKeyboardButton("6 месяцев - 2000₽", callback_data="pay_6_months"),
-        InlineKeyboardButton("12 месяцев - 3500₽", callback_data="pay_12_months"),
-        get_navigation_markup(back_callback="return_home", include_home=False)
+        InlineKeyboardButton("12 месяцев - 3500₽", callback_data="pay_12_months")
     )
+    keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
+    
     await callback_query.message.edit_text(
-        "Выберите период подписки:",
+        "*💳 Выберите период подписки:*\n\n"
+        "• Безлимитный трафик\n"
+        "• Высокая скорость\n"
+        "• Поддержка 24/7\n",
+        parse_mode="Markdown",
         reply_markup=keyboard
     )
+    await callback_query.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('pay_'))
 async def handle_payment(callback_query: types.CallbackQuery):
@@ -1260,7 +1266,7 @@ async def check_payment_status(callback_query: types.CallbackQuery):
                 )
                 
                 await callback_query.message.edit_text(
-                    f"Оплата успешна! Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
+                    f"*Оплата успешна! Ваш VPN ключ:*\n\n{format_vpn_key(vpn_key)}\n\n"
                     "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
                     reply_markup=keyboard
                 )
@@ -1290,90 +1296,201 @@ async def check_payment_status(callback_query: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == 'my_vpn_key')
 async def my_vpn_key_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    payments = db.get_user_payments(user_id)
-    active_payments = [p for p in payments if p['status'] == 'succeeded']
+    clients = db.get_client_list()
+    username = None
     
-    if not active_payments:
+    for client in clients:
+        if str(user_id) == client[0]:  # Assuming client[0] is the username
+            username = client[0]
+            break
+    
+    if not username:
         keyboard = InlineKeyboardMarkup()
-        keyboard.add(InlineKeyboardButton("Купить VPN", callback_data="buy_vpn"))
-        keyboard.add(get_navigation_markup(back_callback="return_home", include_home=False))
+        keyboard.add(
+            InlineKeyboardButton("💳 Купить VPN", callback_data="buy_vpn"),
+            get_navigation_markup(back_callback="home", include_home=False)
+        )
         await callback_query.message.edit_text(
-            "У вас нет активного VPN ключа. Для получения ключа необходимо приобрести подписку.",
+            "*У вас нет активного VPN ключа*\n\n"
+            "Для получения ключа необходимо приобрести подписку.",
+            parse_mode="Markdown",
             reply_markup=keyboard
         )
+        await callback_query.answer()
         return
 
-    # Get or generate VPN key
-    client_name = f"user_{user_id}"
-    vpn_key = None
     try:
-        vpn_key = await generate_vpn_key(client_name)
-    except Exception as e:
-        logger.error(f"Error generating VPN key: {e}")
-        await callback_query.message.edit_text(
-            "Произошла ошибка при генерации ключа. Пожалуйста, попробуйте позже или обратитесь в поддержку.",
-            reply_markup=InlineKeyboardMarkup().add(
-                get_navigation_markup(back_callback="return_home", include_home=False)
-            )
-        )
-        return
+        conf_path = os.path.join('users', username, f'{username}.conf')
+        if not os.path.exists(conf_path):
+            raise FileNotFoundError
+            
+        vpn_key = await generate_vpn_key(conf_path)
+        if not vpn_key:
+            raise ValueError("Failed to generate VPN key")
 
+        formatted_key = format_vpn_key(vpn_key)
+        keyboard = InlineKeyboardMarkup(row_width=1)
+        keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
+        
+        message_text = (
+            "*🔑 Ваш VPN ключ:*\n\n"
+            f"`{formatted_key}`\n\n"
+            "*📱 Инструкция:*\n"
+            "1. Установите приложение AmneziaVPN\n"
+            "2. Нажмите «Импорт» и отсканируйте QR код\n"
+            "3. Нажмите «Подключить»\n\n"
+            "*📥 Скачать AmneziaVPN:*\n"
+            "• [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn)\n"
+            "• [App Store](https://apps.apple.com/app/amnezia-vpn/id1600529900)\n"
+            "• [GitHub](https://github.com/amnezia-vpn/amnezia-client/releases)"
+        )
+        
+        await callback_query.message.edit_text(
+            message_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+            disable_web_page_preview=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in my_vpn_key_callback: {e}")
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
+        await callback_query.message.edit_text(
+            "❌ *Ошибка при получении VPN ключа*\n\n"
+            "Пожалуйста, попробуйте позже или обратитесь в поддержку.",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data == 'help')
+async def help_callback(callback_query: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton("Обновить ключ", callback_data="regenerate_key"),
-        InlineKeyboardButton("Удалить ключ", callback_data="delete_key"),
-        get_navigation_markup(back_callback="return_home", include_home=False)
+    keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
+    
+    help_text = (
+        "*❓ Помощь*\n\n"
+        "*📱 Как подключиться:*\n"
+        "1. Купите подписку VPN\n"
+        "2. Получите свой VPN ключ\n"
+        "3. Установите приложение AmneziaVPN\n"
+        "4. Импортируйте ключ и подключитесь\n\n"
+        "*🔧 Техническая поддержка:*\n"
+        "• Telegram: @support\n"
+        "• Email: support@example.com\n\n"
+        "*📥 Скачать AmneziaVPN:*\n"
+        "• [Google Play](https://play.google.com/store/apps/details?id=org.amnezia.vpn)\n"
+        "• [App Store](https://apps.apple.com/app/amnezia-vpn/id1600529900)\n"
+        "• [GitHub](https://github.com/amnezia-vpn/amnezia-client/releases)"
     )
     
     await callback_query.message.edit_text(
-        f"Ваш VPN ключ:\n\n{format_vpn_key(vpn_key)}\n\n"
-        "Для настройки VPN скопируйте этот ключ и следуйте инструкции в приложении Amnezia VPN.",
+        help_text,
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+        disable_web_page_preview=True
+    )
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data == 'get_config')
+async def get_config_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+
+    clients = db.get_client_list()
+    if not clients:
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
+        await callback_query.message.edit_text(
+            "📋 *Список пользователей пуст*",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        await callback_query.answer()
+        return
+
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    for client in clients:
+        username = client[0]
+        keyboard.add(InlineKeyboardButton(f"📄 {username}", callback_data=f"get_config_{username}"))
+    
+    keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
+    
+    await callback_query.message.edit_text(
+        "*📄 Выберите пользователя для получения конфигурации:*",
+        parse_mode="Markdown",
         reply_markup=keyboard
     )
+    await callback_query.answer()
 
 @dp.callback_query_handler(lambda c: c.data == 'payment_history')
 async def payment_history_callback(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен")
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
         return
-        
+
     payments = db.get_all_payments()
-    message_text = "История платежей:\n\n"
-    
-    for user_id, user_payments in payments.items():
-        for payment in user_payments:
-            timestamp = datetime.fromisoformat(payment['timestamp'])
-            message_text += (
-                f"Пользователь: {user_id}\n"
-                f"ID платежа: {payment['payment_id']}\n"
-                f"Сумма: {payment['amount']} RUB\n"
-                f"Статус: {payment['status']}\n"
-                f"Дата: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            )
-    
-    keyboard = InlineKeyboardMarkup().add(
-        get_navigation_markup(back_callback="home", include_home=False)
-    )
+    if not payments:
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
+        await callback_query.message.edit_text(
+            "💰 *История платежей пуста*",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        await callback_query.answer()
+        return
+
+    text = "*💰 История платежей:*\n\n"
+    for payment in payments:
+        user_id = payment.get('user_id', 'Unknown')
+        amount = payment.get('amount', 0)
+        status = payment.get('status', 'Unknown')
+        date = payment.get('date', 'Unknown')
+        
+        status_emoji = {
+            'pending': '⏳',
+            'succeeded': '✅',
+            'canceled': '❌'
+        }.get(status, '❓')
+        
+        text += (f"*Пользователь:* {user_id}\n"
+                f"*Сумма:* {amount}₽\n"
+                f"*Статус:* {status_emoji} {status}\n"
+                f"*Дата:* {date}\n"
+                f"{'—' * 20}\n")
+
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
     
     await callback_query.message.edit_text(
-        message_text if message_text != "История платежей:\n\n" else "История платежей пуста",
+        text,
+        parse_mode="Markdown",
         reply_markup=keyboard
     )
+    await callback_query.answer()
 
 @dp.callback_query_handler(lambda c: c.data == 'mass_message')
-async def mass_message_prompt(callback_query: types.CallbackQuery):
+async def mass_message_callback(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != admin:
-        await callback_query.answer("Доступ запрещен")
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
         return
-        
-    keyboard = InlineKeyboardMarkup().add(
-        get_navigation_markup(back_callback="home", include_home=False)
-    )
+
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
     
-    user_main_messages[callback_query.from_user.id]['state'] = 'waiting_for_mass_message'
     await callback_query.message.edit_text(
-        "Введите сообщение, которое нужно разослать всем пользователям:",
+        "*📨 Отправка сообщения всем пользователям*\n\n"
+        "Введите текст сообщения для отправки:",
+        parse_mode="Markdown",
         reply_markup=keyboard
     )
+    
+    # Set state for message handler
+    user_main_messages[callback_query.from_user.id]['state'] = 'waiting_for_mass_message'
+    await callback_query.answer()
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)
