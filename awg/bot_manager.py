@@ -24,6 +24,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import payment
+import qrcode
+from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -211,42 +213,45 @@ async def help_command_handler(message: types.Message):
 
 @dp.message_handler()
 async def handle_messages(message: types.Message):
-    if message.chat.id != admin:
-        await message.answer("У вас нет доступа к этому боту.")
-        return
-    user_state = user_main_messages.get(admin, {}).get('state')
-    if user_state == 'waiting_for_user_name':
-        user_name = message.text.strip()
-        if not all(c.isalnum() or c in "-_" for c in user_name):
-            await message.reply("Имя пользователя может содержать только буквы, цифры, дефисы и подчёркивания.")
-            asyncio.create_task(delete_message_after_delay(sent_message.chat.id, sent_message.message_id, delay=2))
-            return
-        user_main_messages[admin]['client_name'] = user_name
-        user_main_messages[admin]['state'] = 'waiting_for_duration'
-        duration_buttons = [
-            InlineKeyboardButton("1 час", callback_data=f"duration_1h_{user_name}_noipv6"),
-            InlineKeyboardButton("1 день", callback_data=f"duration_1d_{user_name}_noipv6"),
-            InlineKeyboardButton("1 неделя", callback_data=f"duration_1w_{user_name}_noipv6"),
-            InlineKeyboardButton("1 месяц", callback_data=f"duration_1m_{user_name}_noipv6"),
-            InlineKeyboardButton("Без ограничений", callback_data=f"duration_unlimited_{user_name}_noipv6"),
-            InlineKeyboardButton("Домой", callback_data="home")
-        ]
-        duration_markup = InlineKeyboardMarkup(row_width=1).add(*duration_buttons)
-        main_chat_id = user_main_messages[admin].get('chat_id')
-        main_message_id = user_main_messages[admin].get('message_id')
-        if main_chat_id and main_message_id:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text=f"Выберите время действия конфигурации для пользователя **{user_name}**:",
-                parse_mode="Markdown",
-                reply_markup=duration_markup
-            )
-        else:
-            await message.answer("Ошибка: главное сообщение не найдено.")
+    # Обработка команд от админа
+    if message.chat.id == admin:
+        user_state = user_main_messages.get(admin, {}).get('state')
+        if user_state == 'waiting_for_user_name':
+            user_name = message.text.strip()
+            if not all(c.isalnum() or c in "-_" for c in user_name):
+                await message.reply("Имя пользователя может содержать только буквы, цифры, дефисы и подчёркивания.")
+                return
+            user_main_messages[admin]['client_name'] = user_name
+            user_main_messages[admin]['state'] = 'waiting_for_duration'
+            duration_buttons = [
+                InlineKeyboardButton("1 час", callback_data=f"duration_1h_{user_name}_noipv6"),
+                InlineKeyboardButton("1 день", callback_data=f"duration_1d_{user_name}_noipv6"),
+                InlineKeyboardButton("1 неделя", callback_data=f"duration_1w_{user_name}_noipv6"),
+                InlineKeyboardButton("1 месяц", callback_data=f"duration_1m_{user_name}_noipv6"),
+                InlineKeyboardButton("Без ограничений", callback_data=f"duration_unlimited_{user_name}_noipv6"),
+                InlineKeyboardButton("Домой", callback_data="home")
+            ]
+            duration_markup = InlineKeyboardMarkup(row_width=1).add(*duration_buttons)
+            main_chat_id = user_main_messages[admin].get('chat_id')
+            main_message_id = user_main_messages[admin].get('message_id')
+            if main_chat_id and main_message_id:
+                await bot.edit_message_text(
+                    chat_id=main_chat_id,
+                    message_id=main_message_id,
+                    text="Выберите длительность:",
+                    reply_markup=duration_markup
+                )
+    # Обработка команд от обычных пользователей
     else:
-        await message.reply("Неизвестная команда или действие.")
-        asyncio.create_task(delete_message_after_delay(sent_message.chat.id, sent_message.message_id, delay=2))
+        # Показываем главное меню если пользователь отправляет неизвестную команду
+        sent_message = await message.answer(
+            "Выберите действие из меню:",
+            reply_markup=user_menu_markup
+        )
+        user_main_messages[message.chat.id] = {
+            'chat_id': sent_message.chat.id,
+            'message_id': sent_message.message_id
+        }
 
 @dp.callback_query_handler(lambda c: c.data.startswith('add_user'))
 async def prompt_for_user_name(callback_query: types.CallbackQuery):
@@ -575,9 +580,8 @@ async def list_users_callback(callback_query: types.CallbackQuery):
                 last_handshake_dt = parse_relative_time(last_handshake_str)
                 if last_handshake_dt:
                     delta = now - last_handshake_dt
-                    delta_days = delta.days
-                    if delta_days <= 5:
-                        status_display = f"🟢({delta_days}d) {username}"
+                    if delta <= timedelta(minutes=1):
+                        status_display = f"🟢({delta.days}d) {username}"
                     else:
                         status_display = f"❌(?d) {username}"
                 else:
@@ -738,40 +742,62 @@ async def client_delete_callback(callback_query: types.CallbackQuery):
         return
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('home'))
+@dp.callback_query_handler(lambda c: c.data == "return_home")
 async def return_home(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
-        return
-    main_chat_id = user_main_messages.get(admin, {}).get('chat_id')
-    main_message_id = user_main_messages.get(admin, {}).get('message_id')
-    if main_chat_id and main_message_id:
-        user_main_messages[admin].pop('state', None)
-        user_main_messages[admin].pop('client_name', None)
-        user_main_messages[admin].pop('duration_choice', None)
-        user_main_messages[admin].pop('traffic_limit', None)
-        try:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text="Выберите действие:",
-                reply_markup=main_menu_markup
+    try:
+        if callback_query.from_user.id == admin:
+            markup = main_menu_markup
+            text = "Выберите действие:"
+        else:
+            markup = user_menu_markup
+            text = "Выберите действие из меню:"
+            
+        if callback_query.message.message_id == user_main_messages.get(callback_query.from_user.id, {}).get('message_id'):
+            await callback_query.message.edit_text(text, reply_markup=markup)
+        else:
+            sent_message = await bot.send_message(
+                callback_query.from_user.id,
+                text,
+                reply_markup=markup
             )
-        except:
-            sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=main_menu_markup)
-            user_main_messages[admin] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
-            try:
-                await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
-            except:
-                pass
-    else:
-        sent_message = await callback_query.message.reply("Выберите действие:", reply_markup=main_menu_markup)
-        user_main_messages[admin] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
+            user_main_messages[callback_query.from_user.id] = {
+                'chat_id': sent_message.chat.id,
+                'message_id': sent_message.message_id
+            }
+    except Exception as e:
+        logger.error(f"Error in return_home: {e}")
+        if callback_query.from_user.id == admin:
+            await bot.send_message(admin, f"Ошибка: {e}")
+
+@dp.callback_query_handler(lambda c: c.data == "support")
+async def support_handler(callback_query: types.CallbackQuery):
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+    await callback_query.message.edit_text(
+        "Для связи с поддержкой напишите: @support_username\n"
+        "Время работы поддержки: 24/7",
+        reply_markup=markup
+    )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('delete_key_'))
+async def delete_key_handler(callback_query: types.CallbackQuery):
+    username = callback_query.data.split('_')[2]
+    if callback_query.from_user.id == admin or f"user_{callback_query.from_user.id}" == username:
         try:
-            await bot.pin_chat_message(chat_id=sent_message.chat.id, message_id=sent_message.message_id, disable_notification=True)
-        except:
-            pass
-    await callback_query.answer()
+            if deactivate_user(username):
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+                await callback_query.message.edit_text(
+                    "VPN ключ успешно удален.",
+                    reply_markup=markup
+                )
+            else:
+                await callback_query.answer("Ошибка при удалении ключа")
+        except Exception as e:
+            logger.error(f"Error in delete_key_handler: {e}")
+            await callback_query.answer("Произошла ошибка при удалении ключа")
+    else:
+        await callback_query.answer("У вас нет доступа к этому ключу")
 
 @dp.callback_query_handler(lambda c: c.data.startswith('get_config'))
 async def list_users_for_config(callback_query: types.CallbackQuery):
@@ -1120,65 +1146,100 @@ async def on_shutdown(dp):
 
 @dp.callback_query_handler(lambda c: c.data == 'buy_key')
 async def buy_key_handler(callback_query: types.CallbackQuery):
-    prices = [
-        ("1 месяц - 300₽", 300),
-        ("3 месяца - 800₽", 800),
-        ("6 месяцев - 1500₽", 1500),
-        ("12 месяцев - 2800₽", 2800)
-    ]
-    
-    markup = InlineKeyboardMarkup(row_width=1)
-    for label, amount in prices:
-        markup.add(InlineKeyboardButton(label, callback_data=f"pay_{amount}"))
-    markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
-    
-    await callback_query.message.edit_text("Выберите тарифный план:", reply_markup=markup)
+    try:
+        prices = [
+            ("1 месяц - 300₽", 300),
+            ("3 месяца - 800₽", 800),
+            ("6 месяцев - 1500₽", 1500),
+            ("12 месяцев - 2800₽", 2800)
+        ]
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        for label, amount in prices:
+            markup.add(InlineKeyboardButton(label, callback_data=f"pay_{amount}"))
+        markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+        
+        await callback_query.message.edit_text(
+            "Выберите тарифный план:\n\n"
+            "• Все тарифы включают:\n"
+            "  - Безлимитный трафик\n"
+            "  - Максимальную скорость\n"
+            "  - Поддержку 24/7",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Error in buy_key_handler: {e}")
+        await callback_query.answer("Произошла ошибка при загрузке тарифов")
 
 @dp.callback_query_handler(lambda c: c.data.startswith('pay_'))
 async def process_payment(callback_query: types.CallbackQuery):
-    amount = int(callback_query.data.split('_')[1])
-    payment_obj = payment.create_payment(amount, callback_query.from_user.id)
-    
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("Оплатить", url=payment_obj.confirmation.confirmation_url))
-    markup.add(InlineKeyboardButton("Проверить оплату", callback_data=f"check_{payment_obj.id}"))
-    markup.add(InlineKeyboardButton("Назад", callback_data="buy_key"))
-    
-    await callback_query.message.edit_text(
-        f"Сумма к оплате: {amount}₽\n\n"
-        "1. Нажмите кнопку «Оплатить»\n"
-        "2. Оплатите счет\n"
-        "3. Вернитесь в бот и нажмите «Проверить оплату»",
-        reply_markup=markup
-    )
+    try:
+        amount = int(callback_query.data.split('_')[1])
+        payment_obj = payment.create_payment(amount, callback_query.from_user.id)
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Оплатить", url=payment_obj.confirmation.confirmation_url))
+        markup.add(InlineKeyboardButton("Проверить оплату", callback_data=f"check_{payment_obj.id}"))
+        markup.add(InlineKeyboardButton("Назад", callback_data="buy_key"))
+        
+        await callback_query.message.edit_text(
+            f"Сумма к оплате: {amount}₽\n\n"
+            "1. Нажмите кнопку «Оплатить»\n"
+            "2. Оплатите счет\n"
+            "3. Вернитесь в бот и нажмите «Проверить оплату»",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Error in process_payment: {e}")
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Назад", callback_data="buy_key"))
+        await callback_query.message.edit_text(
+            "Произошла ошибка при создании платежа. Попробуйте позже или обратитесь в поддержку.",
+            reply_markup=markup
+        )
 
 @dp.callback_query_handler(lambda c: c.data.startswith('check_'))
 async def check_payment_status(callback_query: types.CallbackQuery):
-    payment_id = callback_query.data.split('_')[1]
-    if payment.check_payment(payment_id):
-        # Generate VPN key
-        username = f"user_{callback_query.from_user.id}"
-        if root_add(username):
+    try:
+        payment_id = callback_query.data.split('_')[1]
+        if payment.check_payment(payment_id):
+            username = f"user_{callback_query.from_user.id}"
+            if root_add(username):
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("Получить ключ", callback_data=f"get_key_{username}"))
+                markup.add(InlineKeyboardButton("В главное меню", callback_data="return_home"))
+                await callback_query.message.edit_text(
+                    "✅ Оплата прошла успешно!\n"
+                    "VPN ключ сгенерирован и готов к использованию.",
+                    reply_markup=markup
+                )
+            else:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("Поддержка", callback_data="support"))
+                markup.add(InlineKeyboardButton("В главное меню", callback_data="return_home"))
+                await callback_query.message.edit_text(
+                    "✅ Оплата прошла успешно!\n"
+                    "❌ Но возникла ошибка при генерации ключа.\n"
+                    "Пожалуйста, обратитесь в поддержку.",
+                    reply_markup=markup
+                )
+        else:
             markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("Получить ключ", callback_data=f"get_key_{username}"))
-            markup.add(InlineKeyboardButton("В главное меню", callback_data="return_home"))
+            markup.add(InlineKeyboardButton("Проверить снова", callback_data=callback_query.data))
+            markup.add(InlineKeyboardButton("Назад", callback_data="buy_key"))
             await callback_query.message.edit_text(
-                "Оплата прошла успешно! VPN ключ сгенерирован.",
+                "⏳ Оплата не найдена или еще не прошла.\n"
+                "Попробуйте проверить через несколько секунд.",
                 reply_markup=markup
             )
-        else:
-            await callback_query.message.edit_text(
-                "Оплата прошла успешно, но возникла ошибка при генерации ключа. Пожалуйста, обратитесь в поддержку.",
-                reply_markup=InlineKeyboardMarkup().add(
-                    InlineKeyboardButton("В главное меню", callback_data="return_home")
-                )
-            )
-    else:
+    except Exception as e:
+        logger.error(f"Error in check_payment_status: {e}")
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("Проверить снова", callback_data=callback_query.data))
-        markup.add(InlineKeyboardButton("Назад", callback_data="buy_key"))
+        markup.add(InlineKeyboardButton("Поддержка", callback_data="support"))
+        markup.add(InlineKeyboardButton("В главное меню", callback_data="return_home"))
         await callback_query.message.edit_text(
-            "Оплата не найдена или еще не прошла. Попробуйте проверить позже.",
+            "Произошла ошибка при проверке платежа.\n"
+            "Пожалуйста, обратитесь в поддержку.",
             reply_markup=markup
         )
 
@@ -1208,31 +1269,99 @@ async def my_keys_handler(callback_query: types.CallbackQuery):
         )
 
 @dp.callback_query_handler(lambda c: c.data.startswith('get_key_'))
-async def get_user_key(callback_query: types.CallbackQuery):
-    username = callback_query.data.split('_')[1]
-    if callback_query.from_user.id == admin or f"user_{callback_query.from_user.id}" == username:
-        config_file = f"users/{username}/client.conf"
-        if os.path.exists(config_file):
-            with open(config_file, 'r') as f:
-                config = f.read()
-            formatted_config = format_vpn_key(config)
-            
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("Назад", callback_data="my_keys" if callback_query.from_user.id != admin else "return_home"))
-            
-            await callback_query.message.edit_text(
-                f"Ваш VPN ключ:\n\n{formatted_config}",
-                reply_markup=markup
-            )
-        else:
-            await callback_query.message.edit_text(
-                "Ошибка: файл конфигурации не найден.",
-                reply_markup=InlineKeyboardMarkup().add(
-                    InlineKeyboardButton("Назад", callback_data="return_home")
+async def get_key_handler(callback_query: types.CallbackQuery):
+    try:
+        username = callback_query.data.split('_')[2]
+        if callback_query.from_user.id == admin or f"user_{callback_query.from_user.id}" == username:
+            config = get_user_config(username)
+            if config:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("Удалить ключ", callback_data=f"delete_key_{username}"))
+                markup.add(InlineKeyboardButton("QR код", callback_data=f"get_qr_{username}"))
+                markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+                
+                await callback_query.message.edit_text(
+                    f"<code>{config}</code>\n\n"
+                    "📱 Для подключения:\n"
+                    "1. Установите WireGuard\n"
+                    "2. Нажмите + и выберите «Импорт из буфера обмена»\n"
+                    "3. Скопируйте конфигурацию выше\n"
+                    "4. Вставьте в приложение\n"
+                    "5. Подключитесь",
+                    reply_markup=markup,
+                    parse_mode='HTML'
                 )
-            )
-    else:
-        await callback_query.answer("У вас нет доступа к этому ключу.")
+            else:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("Поддержка", callback_data="support"))
+                markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+                await callback_query.message.edit_text(
+                    "❌ Ошибка при получении конфигурации.\n"
+                    "Пожалуйста, обратитесь в поддержку.",
+                    reply_markup=markup
+                )
+        else:
+            await callback_query.answer("У вас нет доступа к этому ключу")
+    except Exception as e:
+        logger.error(f"Error in get_key_handler: {e}")
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Поддержка", callback_data="support"))
+        markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+        await callback_query.message.edit_text(
+            "Произошла ошибка при получении ключа.\n"
+            "Пожалуйста, обратитесь в поддержку.",
+            reply_markup=markup
+        )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('get_qr_'))
+async def get_qr_handler(callback_query: types.CallbackQuery):
+    try:
+        username = callback_query.data.split('_')[2]
+        if callback_query.from_user.id == admin or f"user_{callback_query.from_user.id}" == username:
+            config = get_user_config(username)
+            if config:
+                qr = qrcode.QRCode(version=1, box_size=10, border=5)
+                qr.add_data(config)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                
+                # Save QR code to buffer
+                img_buffer = BytesIO()
+                img.save(img_buffer, format='PNG')
+                img_buffer.seek(0)
+                
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("Назад к ключу", callback_data=f"get_key_{username}"))
+                
+                # Send QR code
+                await bot.send_photo(
+                    callback_query.message.chat.id,
+                    photo=img_buffer,
+                    caption="QR код для быстрой настройки WireGuard",
+                    reply_markup=markup
+                )
+                await callback_query.message.delete()
+            else:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("Поддержка", callback_data="support"))
+                markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+                await callback_query.message.edit_text(
+                    "❌ Ошибка при генерации QR кода.\n"
+                    "Пожалуйста, обратитесь в поддержку.",
+                    reply_markup=markup
+                )
+        else:
+            await callback_query.answer("У вас нет доступа к этому ключу")
+    except Exception as e:
+        logger.error(f"Error in get_qr_handler: {e}")
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Поддержка", callback_data="support"))
+        markup.add(InlineKeyboardButton("Назад", callback_data="return_home"))
+        await callback_query.message.edit_text(
+            "Произошла ошибка при генерации QR кода.\n"
+            "Пожалуйста, обратитесь в поддержку.",
+            reply_markup=markup
+        )
 
 @dp.callback_query_handler(lambda c: c.data == 'payment_history')
 async def payment_history_handler(callback_query: types.CallbackQuery):
