@@ -1414,8 +1414,7 @@ async def get_config_callback(callback_query: types.CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(row_width=1)
     for client in clients:
-        username = client[0]
-        keyboard.add(InlineKeyboardButton(f"📄 {username}", callback_data=f"get_config_{username}"))
+        keyboard.insert(InlineKeyboardButton(client[0], callback_data=f"get_config_{client[0]}"))
     
     keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
     
@@ -1492,5 +1491,223 @@ async def mass_message_callback(callback_query: types.CallbackQuery):
     # Set state for message handler
     user_main_messages[callback_query.from_user.id]['state'] = 'waiting_for_mass_message'
     await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('get_config_'))
+async def send_user_config(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+
+    _, username = callback_query.data.split('get_config_', 1)
+    username = username.strip()
+
+    try:
+        conf_path = os.path.join('users', username, f'{username}.conf')
+        if not os.path.exists(conf_path):
+            raise FileNotFoundError("Конфигурационный файл не найден")
+
+        vpn_key = await generate_vpn_key(conf_path)
+        if not vpn_key:
+            raise ValueError("Не удалось сгенерировать VPN ключ")
+
+        formatted_key = format_vpn_key(vpn_key)
+        keyboard = InlineKeyboardMarkup(row_width=1)
+        keyboard.add(
+            InlineKeyboardButton("🔄 Обновить ключ", callback_data=f"regenerate_{username}"),
+            get_navigation_markup(back_callback="get_config", include_home=True)
+        )
+
+        message_text = (
+            f"*📱 Конфигурация пользователя {username}*\n\n"
+            f"`{formatted_key}`\n\n"
+            "*ℹ️ Информация:*\n"
+            "• Ключ можно использовать только на одном устройстве\n"
+            "• При обновлении ключа старый ключ перестанет работать\n"
+            "• Для подключения используйте приложение AmneziaVPN"
+        )
+
+        await callback_query.message.edit_text(
+            message_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    except Exception as e:
+        logger.error(f"Error in send_user_config: {e}")
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(get_navigation_markup(back_callback="get_config", include_home=True))
+        await callback_query.message.edit_text(
+            "❌ *Ошибка при получении конфигурации*\n\n"
+            f"Пользователь: {username}\n"
+            f"Ошибка: {str(e)}",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('delete_user_'))
+async def delete_user_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+
+    _, username = callback_query.data.split('delete_user_', 1)
+    username = username.strip()
+
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton("✅ Да", callback_data=f"confirm_delete_{username}"),
+        InlineKeyboardButton("❌ Нет", callback_data=f"client_{username}")
+    )
+
+    await callback_query.message.edit_text(
+        f"*⚠️ Удаление пользователя*\n\n"
+        f"Вы действительно хотите удалить пользователя *{username}*?\n\n"
+        "❗️ Это действие нельзя отменить",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('confirm_delete_'))
+async def confirm_delete_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+
+    _, username = callback_query.data.split('confirm_delete_', 1)
+    username = username.strip()
+
+    try:
+        await deactivate_user(username)
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(get_navigation_markup(back_callback="list_users", include_home=True))
+        
+        await callback_query.message.edit_text(
+            f"✅ *Пользователь {username} успешно удален*",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Error deleting user {username}: {e}")
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(get_navigation_markup(back_callback=f"client_{username}", include_home=True))
+        
+        await callback_query.message.edit_text(
+            f"❌ *Ошибка при удалении пользователя {username}*\n\n"
+            f"Причина: {str(e)}",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('regenerate_'))
+async def regenerate_key_callback(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != admin:
+        await callback_query.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+        return
+
+    _, username = callback_query.data.split('regenerate_', 1)
+    username = username.strip()
+
+    try:
+        # Create backup of old config
+        old_conf_path = os.path.join('users', username, f'{username}.conf')
+        backup_conf_path = os.path.join('users', username, f'{username}.conf.bak')
+        if os.path.exists(old_conf_path):
+            shutil.copy2(old_conf_path, backup_conf_path)
+
+        # Generate new key
+        vpn_key = await generate_vpn_key(old_conf_path)
+        if not vpn_key:
+            raise ValueError("Не удалось сгенерировать новый ключ")
+
+        formatted_key = format_vpn_key(vpn_key)
+        keyboard = InlineKeyboardMarkup(row_width=1)
+        keyboard.add(get_navigation_markup(back_callback=f"client_{username}", include_home=True))
+
+        message_text = (
+            f"*🔄 Ключ пользователя {username} обновлен*\n\n"
+            f"`{formatted_key}`\n\n"
+            "*ℹ️ Важно:*\n"
+            "• Старый ключ больше не будет работать\n"
+            "• Передайте новый ключ пользователю\n"
+            "• Для подключения используйте приложение AmneziaVPN"
+        )
+
+        await callback_query.message.edit_text(
+            message_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    except Exception as e:
+        logger.error(f"Error regenerating key for {username}: {e}")
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(get_navigation_markup(back_callback=f"client_{username}", include_home=True))
+        
+        await callback_query.message.edit_text(
+            f"❌ *Ошибка при обновлении ключа*\n\n"
+            f"Пользователь: {username}\n"
+            f"Ошибка: {str(e)}",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    await callback_query.answer()
+
+@dp.message_handler(content_types=['text'])
+async def handle_text(message: types.Message):
+    user_id = message.from_user.id
+    user_state = user_main_messages.get(user_id, {}).get('state')
+
+    if user_state == 'waiting_for_mass_message':
+        if user_id != admin:
+            await message.reply("У вас нет прав для отправки массовых сообщений.")
+            return
+
+        text = message.text.strip()
+        if not text:
+            await message.reply("Сообщение не может быть пустым.")
+            return
+
+        # Get all users
+        clients = db.get_client_list()
+        sent_count = 0
+        failed_count = 0
+
+        for client in clients:
+            try:
+                await bot.send_message(
+                    chat_id=int(client[0]),
+                    text=f"*📢 Сообщение от администратора:*\n\n{text}",
+                    parse_mode="Markdown"
+                )
+                sent_count += 1
+            except Exception as e:
+                logger.error(f"Failed to send message to {client[0]}: {e}")
+                failed_count += 1
+
+        # Clear state
+        if user_id in user_main_messages:
+            user_main_messages[user_id].pop('state', None)
+
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(get_navigation_markup(back_callback="home", include_home=False))
+
+        status_text = (
+            "*📨 Результат рассылки:*\n\n"
+            f"✅ Успешно отправлено: {sent_count}\n"
+            f"❌ Ошибок отправки: {failed_count}\n"
+            f"📊 Всего пользователей: {len(clients)}"
+        )
+
+        await message.reply(
+            status_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)
