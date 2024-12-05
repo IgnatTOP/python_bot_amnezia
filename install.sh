@@ -219,14 +219,14 @@ install_and_configure_needrestart() {
 }
 
 clone_repository() {
-    if [[ -d "awg" ]]; then
+    if [[ -d "awg-docker-bot" ]]; then
         echo -e "\n${YELLOW}Репозиторий существует${NC}"
-        cd awg || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+        cd awg-docker-bot || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
         return 0
     fi
     
-    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git awg >/dev/null 2>&1"
-    cd awg || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+    run_with_spinner "Клонирование репозитория" "git clone https://github.com/JB-SelfCompany/awg-docker-bot.git >/dev/null 2>&1"
+    cd awg-docker-bot || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
 }
 
 setup_venv() {
@@ -235,7 +235,7 @@ setup_venv() {
         return 0
     fi
     
-    run_with_spinner "Настройка виртуального окружения" "python3.11 -m venv myenv && source myenv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
+    run_with_spinner "Настройка виртуального окружения" "python3.11 -m venv myenv && source myenv/bin/activate && pip install --upgrade pip && pip install -r $(pwd)/requirements.txt && deactivate"
 }
 
 set_permissions() {
@@ -246,40 +246,19 @@ set_permissions() {
 }
 
 initialize_bot() {
-    run_with_spinner "Initializing bot configuration" "
-        cd $SCRIPT_DIR && \
-        source myenv/bin/activate && \
-        mkdir -p files && \
-        python3 -c '
-import sys
-sys.path.append(\"awg\")
-import db
-import os
-import configparser
-
-config = configparser.ConfigParser()
-config.add_section(\"setting\")
-
-bot_token = \"7782664718:AAFkre94HlYW_RCDqA2YBUc8guo2B5-EpSM\"
-admin_id = \"487523019\"
-docker_container = db.get_amnezia_container()
-wg_config_file = \"/opt/amnezia/awg/wg0.conf\"
-endpoint = \"AmneziaVPNIZbot\"
-yookassa_shop_id = \"993270\"
-yookassa_token = \"test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE\"
-
-config.set(\"setting\", \"bot_token\", bot_token)
-config.set(\"setting\", \"admin_id\", admin_id)
-config.set(\"setting\", \"docker_container\", docker_container)
-config.set(\"setting\", \"wg_config_file\", wg_config_file)
-config.set(\"setting\", \"endpoint\", endpoint)
-config.set(\"setting\", \"yookassa_shop_id\", yookassa_shop_id)
-config.set(\"setting\", \"yookassa_token\", yookassa_token)
-
-with open(\"files/setting.ini\", \"w\") as config_file:
-    config.write(config_file)
-'
-    "
+    cd awg || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+    
+    ../myenv/bin/python3.11 bot_manager.py < /dev/tty &
+    local BOT_PID=$!
+    
+    while [ ! -f "files/setting.ini" ]; do
+        sleep 2
+        kill -0 "$BOT_PID" 2>/dev/null || { echo -e "\n${RED}Бот завершил работу до инициализации${NC}"; exit 1; }
+    done
+    
+    kill "$BOT_PID"
+    wait "$BOT_PID" 2>/dev/null
+    cd ..
 }
 
 create_service() {
@@ -290,8 +269,8 @@ After=network.target
 
 [Service]
 User=$USER
-WorkingDirectory=$SCRIPT_DIR
-ExecStart=$SCRIPT_DIR/myenv/bin/python3.11 awg/bot_manager.py
+WorkingDirectory=$(pwd)/awg
+ExecStart=$(pwd)/myenv/bin/python3.11 bot_manager.py
 Restart=always
 
 [Install]
