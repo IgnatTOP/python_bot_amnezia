@@ -48,8 +48,9 @@ WG_CONFIG_FILE = wg_config_file
 DOCKER_CONTAINER = docker_container
 ENDPOINT = endpoint
 
-Configuration.account_id = ukassa_shop_id
-Configuration.secret_key = ukassa_secret_key
+# Настройки ЮKassa
+Configuration.account_id = '993270'
+Configuration.secret_key = 'test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE'
 
 class AdminMessageDeletionMiddleware(BaseMiddleware):
     async def on_process_message(self, message: types.Message, data: dict):
@@ -78,10 +79,10 @@ CACHE_TTL = timedelta(hours=24)
 TRAFFIC_LIMITS = ["5 GB", "10 GB", "30 GB", "100 GB", "Неограниченно"]
 
 PRICES = {
-    "1_month": 10.00,  # 1 месяц - 10$
-    "3_months": 25.00,  # 3 месяца - 25$
-    "6_months": 45.00,  # 6 месяцев - 45$
-    "12_months": 80.00  # 12 месяцев - 80$
+    "1_month": 1000.00,  # 1 месяц - 1000 руб
+    "3_months": 2500.00,  # 3 месяца - 2500 руб
+    "6_months": 4500.00,  # 6 месяцев - 4500 руб
+    "12_months": 8000.00  # 12 месяцев - 8000 руб
 }
 
 user_menu_markup = InlineKeyboardMarkup(row_width=1).add(
@@ -1131,7 +1132,7 @@ async def buy_vpn(callback_query: types.CallbackQuery):
     for period, price in PRICES.items():
         months = period.split('_')[0]
         markup.add(InlineKeyboardButton(
-            f"{months} {'месяц' if months == '1' else 'месяцев'} - ${price}",
+            f"{months} {'месяц' if months == '1' else 'месяцев'} - {price} ₽",
             callback_data=f"purchase_{period}"
         ))
     markup.add(InlineKeyboardButton("Назад", callback_data="return_user_menu"))
@@ -1146,8 +1147,6 @@ async def process_purchase(callback_query: types.CallbackQuery):
             
         price = PRICES[period]
         months = int(period.split('_')[0])
-        
-        payment_id = str(uuid.uuid4())
         
         payment = Payment.create({
             "amount": {
@@ -1166,6 +1165,7 @@ async def process_purchase(callback_query: types.CallbackQuery):
             }
         })
         
+        # Сохраняем информацию о платеже
         db.add_payment(callback_query.from_user.id, payment.id, price)
         
         markup = InlineKeyboardMarkup(row_width=1)
@@ -1177,7 +1177,7 @@ async def process_purchase(callback_query: types.CallbackQuery):
         
         await callback_query.message.edit_text(
             f"Подписка на {months} {'месяц' if months == 1 else 'месяцев'}\n"
-            f"Сумма к оплате: {price} RUB\n\n"
+            f"Сумма к оплате: {price} ₽\n\n"
             "1. Нажмите кнопку «Оплатить»\n"
             "2. Оплатите счет\n"
             "3. Вернитесь в бот и нажмите «Проверить оплату»",
