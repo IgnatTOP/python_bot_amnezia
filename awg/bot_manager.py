@@ -19,14 +19,11 @@ from aiogram.dispatcher import Dispatcher
 from aiogram.dispatcher.middlewares import BaseMiddleware
 from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from yookassa import Configuration, Payment
-import uuid
+import payment
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,8 +34,6 @@ admin_id = setting.get('admin_id')
 wg_config_file = setting.get('wg_config_file')
 docker_container = setting.get('docker_container')
 endpoint = setting.get('endpoint')
-Configuration.account_id = setting.get('yookassa_shop_id', '993270')
-Configuration.secret_key = setting.get('yookassa_token', 'test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE')
 
 if not all([bot_token, admin_id, wg_config_file, docker_container, endpoint]):
     logger.error("Некоторые обязательные настройки отсутствуют в конфигурационном файле.")
@@ -49,8 +44,6 @@ admin = int(admin_id)
 WG_CONFIG_FILE = wg_config_file
 DOCKER_CONTAINER = docker_container
 ENDPOINT = endpoint
-
-VPN_PRICE = 500
 
 class AdminMessageDeletionMiddleware(BaseMiddleware):
     async def on_process_message(self, message: types.Message, data: dict):
@@ -63,20 +56,22 @@ scheduler.start()
 
 dp.middleware.setup(AdminMessageDeletionMiddleware())
 
-main_menu_markup = InlineKeyboardMarkup(row_width=1)
-main_menu_markup.add(
-    InlineKeyboardButton("💳 Купить VPN", callback_data="buy_vpn"),
-    InlineKeyboardButton("🔑 Мой ключ VPN", callback_data="my_vpn_key")
+PRICE = 1000  # Price in RUB
+
+main_menu_markup = InlineKeyboardMarkup(row_width=1).add(
+    InlineKeyboardButton("🔑 Get VPN Key", callback_data="buy_key"),
+    InlineKeyboardButton("🔄 Regenerate Key", callback_data="regenerate_key"),
+    InlineKeyboardButton("❌ Delete Key", callback_data="delete_key"),
+    InlineKeyboardButton("ℹ️ My Keys", callback_data="my_keys")
 )
 
-if admin:
-    main_menu_markup.add(
-        InlineKeyboardButton("👥 Добавить пользователя", callback_data="add_user"),
-        InlineKeyboardButton("📋 Список клиентов", callback_data="list_users"),
-        InlineKeyboardButton("💰 История платежей", callback_data="payment_history"),
-        InlineKeyboardButton("📢 Массовая рассылка", callback_data="mass_message"),
-        InlineKeyboardButton("💾 Создать бекап", callback_data="create_backup")
-    )
+admin_menu_markup = InlineKeyboardMarkup(row_width=1).add(
+    InlineKeyboardButton("👥 Add User", callback_data="add_user"),
+    InlineKeyboardButton("📋 User List", callback_data="list_users"),
+    InlineKeyboardButton("💾 Create Backup", callback_data="create_backup"),
+    InlineKeyboardButton("💰 Payment History", callback_data="payment_history"),
+    InlineKeyboardButton("📢 Mass Message", callback_data="mass_message")
+)
 
 user_main_messages = {}
 isp_cache = {}
@@ -203,53 +198,17 @@ def parse_relative_time(relative_str: str) -> datetime:
         logger.error(f"Ошибка при парсинге относительного времени '{relative_str}': {e}")
         return None
 
-@dp.message_handler(commands=['start'])
-async def start_command_handler(message: types.Message):
-    user_id = message.from_user.id
-    sent_message = await message.answer(
-        "👋 Добро пожаловать в бот AmneziaVPN!\n\n"
-        "Выберите действие из меню ниже:",
-        reply_markup=main_menu_markup
-    )
-    
-    user_main_messages[user_id] = {
-        'chat_id': sent_message.chat.id,
-        'message_id': sent_message.message_id
-    }
-    
-    if user_id == admin:
-        try:
-            await bot.pin_chat_message(
-                chat_id=message.chat.id,
-                message_id=sent_message.message_id,
-                disable_notification=True
-            )
-        except Exception:
-            pass
-
-@dp.message_handler(commands=['help'])
+@dp.message_handler(commands=['start', 'help'])
 async def help_command_handler(message: types.Message):
-    if message.from_user.id == admin:
-        help_text = """
-📌 Команды администратора:
-/start - Начать работу с ботом
-/help - Показать это сообщение
-• Добавить пользователя - Создать нового пользователя VPN
-• Список клиентов - Просмотр и управление пользователями
-• История платежей - Просмотр всех платежей
-• Массовая рассылка - Отправить сообщение всем пользователям
-• Создать бекап - Создать резервную копию конфигурации
-"""
+    if message.chat.id == admin:
+        sent_message = await message.answer("Выберите действие:", reply_markup=main_menu_markup)
+        user_main_messages[admin] = {'chat_id': sent_message.chat.id, 'message_id': sent_message.message_id}
+        try:
+            await bot.pin_chat_message(chat_id=message.chat.id, message_id=sent_message.message_id, disable_notification=True)
+        except:
+            pass
     else:
-        help_text = """
-📌 Доступные команды:
-/start - Начать работу с ботом
-/help - Показать это сообщение
-• Купить VPN - Приобрести доступ к VPN
-• Мой ключ VPN - Получить или управлять вашим VPN ключом
-"""
-    
-    await message.reply(help_text, parse_mode="HTML")
+        await message.answer("У вас нет доступа к этому боту.")
 
 @dp.message_handler()
 async def handle_messages(message: types.Message):
@@ -1160,228 +1119,347 @@ async def on_shutdown(dp):
     scheduler.shutdown()
     logger.info("Планировщик остановлен.")
 
-async def create_payment(user_id: int) -> dict:
-    idempotence_key = str(uuid.uuid4())
-    payment = Payment.create({
-        "amount": {
-            "value": str(VPN_PRICE),
-            "currency": "RUB"
-        },
-        "confirmation": {
-            "type": "redirect",
-            "return_url": f"https://t.me/AmneziaVPNIZbot"
-        },
-        "capture": True,
-        "description": f"Оплата VPN для пользователя {user_id}",
-        "metadata": {
-            "user_id": user_id
-        }
-    }, idempotence_key)
-    
-    db.add_payment(user_id, VPN_PRICE, payment.id)
-    return payment.confirmation.confirmation_url
-
-async def check_payment(payment_id: str) -> bool:
-    payment = Payment.find_one(payment_id)
-    if payment.status == "succeeded":
-        db.update_payment_status(payment_id, "succeeded")
-        user_id = payment.metadata.get("user_id")
-        if user_id:
-            db.add_user_license(user_id)
-        return True
-    elif payment.status in ["canceled", "pending"]:
-        db.update_payment_status(payment_id, payment.status)
-    return False
-
-@dp.callback_query_handler(lambda c: c.data == "buy_vpn")
-async def buy_vpn_callback(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    
-    if db.check_user_license(user_id):
-        await bot.answer_callback_query(callback_query.id)
-        await bot.send_message(user_id, "У вас уже есть активная лицензия VPN!")
-        return
-
-    payment_url = await create_payment(user_id)
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("Оплатить", url=payment_url))
-    markup.add(InlineKeyboardButton("Проверить оплату", callback_data="check_payment"))
-    
-    await bot.answer_callback_query(callback_query.id)
-    await bot.send_message(
-        user_id,
-        f"Стоимость VPN: {VPN_PRICE} руб.\n\n"
-        "После оплаты нажмите 'Проверить оплату' для получения ключа.",
-        reply_markup=markup
-    )
-
-@dp.callback_query_handler(lambda c: c.data == "check_payment")
-async def check_payment_callback(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    user_payments = db.get_user_payments(user_id)
-    
-    if not user_payments:
-        await bot.answer_callback_query(callback_query.id, text="Платежи не найдены")
-        return
-    
-    latest_payment = max(user_payments, key=lambda x: x['timestamp'])
-    if latest_payment['status'] == 'succeeded':
-        await bot.answer_callback_query(callback_query.id, text="Оплата уже подтверждена")
-        return
-        
-    if await check_payment(latest_payment['payment_id']):
-        # Generate VPN key
-        username = f"user_{user_id}"
-        await generate_vpn_key(username)
-        await bot.send_message(
-            user_id,
-            "✅ Оплата подтверждена! Ваш ключ VPN готов.\n"
-            "Используйте кнопку 'Мой ключ VPN' для получения конфигурации."
-        )
-    else:
-        await bot.answer_callback_query(
-            callback_query.id,
-            text="Оплата еще не подтверждена. Попробуйте позже.",
-            show_alert=True
-        )
-
-@dp.callback_query_handler(lambda c: c.data == "my_vpn_key")
-async def my_vpn_key_callback(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    
-    if not db.check_user_license(user_id):
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("💳 Купить VPN", callback_data="buy_vpn"))
-        await bot.send_message(
-            user_id,
-            "У вас нет активной лицензии VPN. Приобретите лицензию для получения ключа.",
-            reply_markup=markup
-        )
-        return
-
-    username = f"user_{user_id}"
-    markup = InlineKeyboardMarkup()
-    markup.add(
-        InlineKeyboardButton("🔄 Перегенерировать ключ", callback_data="regenerate_key"),
-        InlineKeyboardButton("❌ Удалить ключ", callback_data="delete_key")
-    )
-    
+@dp.callback_query_handler(lambda c: c.data == 'buy_key')
+async def buy_key(callback_query: types.CallbackQuery):
     try:
-        await send_user_config(callback_query, username)
-        await bot.send_message(
-            user_id,
-            "Дополнительные действия:",
+        payment_obj = payment.create_payment(PRICE, callback_query.from_user.id)
+        markup = InlineKeyboardMarkup().add(
+            InlineKeyboardButton("Pay", url=payment_obj.confirmation.confirmation_url),
+            InlineKeyboardButton("Check Payment", callback_data=f"check_payment_{payment_obj.id}")
+        )
+        await callback_query.message.edit_text(
+            f"To get your VPN key, please complete the payment of {PRICE} RUB.\n"
+            "After payment, click 'Check Payment' to receive your key.",
             reply_markup=markup
         )
     except Exception as e:
-        if "No configuration found" in str(e):
-            await generate_vpn_key(username)
-            await send_user_config(callback_query, username)
-            await bot.send_message(
-                user_id,
-                "Дополнительные действия:",
-                reply_markup=markup
-            )
+        logger.error(f"Error creating payment: {e}")
+        await callback_query.message.edit_text(
+            "Sorry, there was an error processing your payment request. Please try again later.",
+            reply_markup=main_menu_markup
+        )
 
-@dp.callback_query_handler(lambda c: c.data == "regenerate_key")
-async def regenerate_key_callback(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    
-    if not db.check_user_license(user_id):
-        await bot.answer_callback_query(
-            callback_query.id,
-            text="У вас нет активной лицензии VPN",
+@dp.callback_query_handler(lambda c: c.data.startswith('check_payment_'))
+async def check_payment_status(callback_query: types.CallbackQuery):
+    try:
+        payment_id = callback_query.data.split('_')[2]
+        if payment.check_payment(payment_id):
+            try:
+                # Generate VPN key
+                conf_path = await generate_vpn_key(None)
+                
+                # Verify the key was generated
+                if not os.path.exists(conf_path):
+                    raise FileNotFoundError("VPN key file was not generated")
+                
+                with open(conf_path, 'r') as f:
+                    config = f.read()
+                    if not config.strip():
+                        raise ValueError("Generated VPN key file is empty")
+                
+                # Send config file
+                await bot.send_document(
+                    callback_query.from_user.id,
+                    types.InputFile(conf_path, filename='vpn_config.conf'),
+                    caption="Here's your VPN configuration file. Install it in your Amnezia VPN client."
+                )
+                
+                # Clean up the temporary file
+                try:
+                    os.remove(conf_path)
+                except Exception as e:
+                    logger.error(f"Error removing temporary config file: {e}")
+                    
+            except Exception as e:
+                logger.error(f"Error generating VPN key: {e}")
+                await callback_query.message.edit_text(
+                    "Payment successful, but there was an error generating your VPN key. "
+                    "Please contact support with your payment ID.",
+                    reply_markup=main_menu_markup
+                )
+        else:
+            await callback_query.answer(
+                "Payment not completed yet. Please complete the payment and try again. "
+                "If you've already paid, please wait a few minutes and try again.",
+                show_alert=True
+            )
+    except Exception as e:
+        logger.error(f"Error checking payment status: {e}")
+        await callback_query.answer(
+            "There was an error checking your payment status. Please try again later.",
             show_alert=True
         )
-        return
 
-    username = f"user_{user_id}"
-    await deactive_user_db(username)
-    await generate_vpn_key(username)
-    await bot.answer_callback_query(callback_query.id, text="Ключ перегенерирован")
-    await send_user_config(callback_query, username)
-
-@dp.callback_query_handler(lambda c: c.data == "delete_key")
-async def delete_key_callback(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    username = f"user_{user_id}"
-    
-    await deactive_user_db(username)
-    await bot.answer_callback_query(callback_query.id, text="Ключ удален")
-    await bot.send_message(user_id, "Ваш ключ VPN был удален")
-
-@dp.callback_query_handler(lambda c: c.data == "payment_history")
-async def payment_history_callback(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await bot.answer_callback_query(callback_query.id, text="Недостаточно прав")
-        return
-
-    payments = db.get_all_payments()
-    if not payments:
-        await bot.send_message(admin, "История платежей пуста")
-        return
-
-    message_text = "📊 История платежей:\n\n"
-    for payment in payments:
-        status_emoji = "✅" if payment['status'] == 'succeeded' else "⏳" if payment['status'] == 'pending' else "❌"
-        message_text += (
-            f"{status_emoji} ID: {payment['payment_id']}\n"
-            f"Пользователь: {payment['user_id']}\n"
-            f"Сумма: {payment['amount']} руб.\n"
-            f"Статус: {payment['status']}\n"
-            f"Дата: {payment['timestamp']}\n\n"
+@dp.callback_query_handler(lambda c: c.data == 'regenerate_key')
+async def regenerate_key(callback_query: types.CallbackQuery):
+    try:
+        user_id = str(callback_query.from_user.id)
+        clients = get_clients_from_clients_table()
+        
+        if user_id in clients:
+            try:
+                # Generate new key
+                conf_path = await generate_vpn_key(None)
+                
+                # Verify the key was generated
+                if not os.path.exists(conf_path):
+                    raise FileNotFoundError("VPN key file was not generated")
+                
+                with open(conf_path, 'r') as f:
+                    config = f.read()
+                    if not config.strip():
+                        raise ValueError("Generated VPN key file is empty")
+                
+                # Send config file
+                await bot.send_document(
+                    callback_query.from_user.id,
+                    types.InputFile(conf_path, filename='vpn_config.conf'),
+                    caption="Here's your new VPN configuration file. The old one will no longer work."
+                )
+                
+                # Clean up
+                try:
+                    os.remove(conf_path)
+                except Exception as e:
+                    logger.error(f"Error removing temporary config file: {e}")
+                
+                await callback_query.message.edit_text(
+                    "✅ Your VPN key has been regenerated successfully!",
+                    reply_markup=main_menu_markup
+                )
+            except Exception as e:
+                logger.error(f"Error regenerating key: {e}")
+                await callback_query.message.edit_text(
+                    "Sorry, there was an error regenerating your VPN key. Please try again later.",
+                    reply_markup=main_menu_markup
+                )
+        else:
+            await callback_query.message.edit_text(
+                "You don't have an active VPN key. Please purchase one first.",
+                reply_markup=main_menu_markup
+            )
+    except Exception as e:
+        logger.error(f"Error in regenerate_key: {e}")
+        await callback_query.message.edit_text(
+            "An unexpected error occurred. Please try again later.",
+            reply_markup=main_menu_markup
         )
 
-    await bot.send_message(admin, message_text)
+@dp.callback_query_handler(lambda c: c.data == 'delete_key')
+async def delete_key(callback_query: types.CallbackQuery):
+    try:
+        user_id = str(callback_query.from_user.id)
+        clients = get_clients_from_clients_table()
+        
+        if user_id in clients:
+            try:
+                await deactivate_user(user_id)
+                await callback_query.message.edit_text(
+                    "✅ Your VPN key has been deleted successfully. You can purchase a new one at any time.",
+                    reply_markup=main_menu_markup
+                )
+            except Exception as e:
+                logger.error(f"Error deactivating user: {e}")
+                await callback_query.message.edit_text(
+                    "Sorry, there was an error deleting your VPN key. Please try again later.",
+                    reply_markup=main_menu_markup
+                )
+        else:
+            await callback_query.message.edit_text(
+                "You don't have an active VPN key to delete.",
+                reply_markup=main_menu_markup
+            )
+    except Exception as e:
+        logger.error(f"Error in delete_key: {e}")
+        await callback_query.message.edit_text(
+            "An unexpected error occurred. Please try again later.",
+            reply_markup=main_menu_markup
+        )
 
-@dp.callback_query_handler(lambda c: c.data == "mass_message")
-async def mass_message_callback(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != admin:
-        await bot.answer_callback_query(callback_query.id, text="Недостаточно прав")
-        return
+@dp.callback_query_handler(lambda c: c.data == 'my_keys')
+async def my_keys(callback_query: types.CallbackQuery):
+    try:
+        user_id = str(callback_query.from_user.id)
+        clients = get_clients_from_clients_table()
+        
+        if user_id in clients:
+            client_info = clients[user_id]
+            # Get payment history for this user
+            user_payments = payment.get_payment_history(user_id)
+            latest_payment = None
+            if user_payments:
+                latest_payment = max(user_payments.values(), key=lambda x: x['created_at'])
+            
+            status_text = (
+                f"🔑 Your VPN Key Information:\n\n"
+                f"Status: Active\n"
+                f"Created: {client_info.get('created_at', 'N/A')}\n"
+            )
+            
+            if latest_payment:
+                status_text += (
+                    f"\nLatest Payment:\n"
+                    f"Amount: {latest_payment['amount']} RUB\n"
+                    f"Date: {latest_payment['created_at']}\n"
+                )
+            
+            await callback_query.message.edit_text(
+                status_text,
+                reply_markup=main_menu_markup
+            )
+        else:
+            await callback_query.message.edit_text(
+                "You don't have any active VPN keys. Would you like to purchase one?",
+                reply_markup=main_menu_markup
+            )
+    except Exception as e:
+        logger.error(f"Error in my_keys: {e}")
+        await callback_query.message.edit_text(
+            "An unexpected error occurred while fetching your key information. Please try again later.",
+            reply_markup=main_menu_markup
+        )
 
-    await bot.send_message(
-        admin,
-        "Отправьте сообщение для массовой рассылки.\n"
-        "Для отмены используйте /cancel"
-    )
-    await MassMessage.waiting_for_message.set()
-
-class MassMessage(StatesGroup):
-    waiting_for_message = State()
-
-@dp.message_handler(state=MassMessage.waiting_for_message)
-async def process_mass_message(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.finish()
-        await message.reply("Рассылка отменена")
-        return
-
-    users = set()
-    # Collect users from payments
-    payments = db.get_all_payments()
-    for payment in payments:
-        users.add(payment['user_id'])
-    
-    # Collect users from licenses
-    licenses = db.load_licenses()
-    for user_id in licenses:
-        users.add(int(user_id))
-
-    sent_count = 0
-    failed_count = 0
-    for user_id in users:
+@dp.callback_query_handler(lambda c: c.data == 'payment_history')
+async def show_payment_history(callback_query: types.CallbackQuery):
+    if str(callback_query.from_user.id) == str(admin):
         try:
-            await bot.send_message(user_id, message.text)
-            sent_count += 1
-        except Exception:
-            failed_count += 1
+            payments = payment.get_payment_history()
+            if payments:
+                history_text = "💰 Payment History:\n\n"
+                total_amount = 0
+                successful_payments = 0
+                
+                for payment_id, details in payments.items():
+                    if details['status'] == 'succeeded':
+                        total_amount += float(details['amount'])
+                        successful_payments += 1
+                    
+                    history_text += (
+                        f"ID: {payment_id}\n"
+                        f"User: {details['user_id']}\n"
+                        f"Amount: {details['amount']} RUB\n"
+                        f"Status: {details['status']}\n"
+                        f"Date: {details['created_at']}\n\n"
+                    )
+                
+                history_text += (
+                    f"📊 Summary:\n"
+                    f"Total Successful Payments: {successful_payments}\n"
+                    f"Total Revenue: {total_amount} RUB\n"
+                )
+            else:
+                history_text = "No payment history available."
+            
+            # Split message if it's too long
+            if len(history_text) > 4000:
+                parts = [history_text[i:i+4000] for i in range(0, len(history_text), 4000)]
+                for i, part in enumerate(parts):
+                    if i == len(parts) - 1:
+                        await callback_query.message.answer(part, reply_markup=admin_menu_markup)
+                    else:
+                        await callback_query.message.answer(part)
+            else:
+                await callback_query.message.edit_text(history_text, reply_markup=admin_menu_markup)
+                
+        except Exception as e:
+            logger.error(f"Error showing payment history: {e}")
+            await callback_query.message.edit_text(
+                "Sorry, there was an error fetching the payment history. Please try again later.",
+                reply_markup=admin_menu_markup
+            )
+    else:
+        await callback_query.answer("This feature is only available to administrators.")
 
+@dp.callback_query_handler(lambda c: c.data == 'mass_message')
+async def prompt_mass_message(callback_query: types.CallbackQuery):
+    if str(callback_query.from_user.id) == str(admin):
+        try:
+            # Get count of active users
+            clients = get_clients_from_clients_table()
+            user_count = len(clients)
+            
+            await callback_query.message.edit_text(
+                f"📢 Send Mass Message\n\n"
+                f"You are about to send a message to {user_count} users.\n"
+                f"Please send the message you want to broadcast.\n\n"
+                f"Message Guidelines:\n"
+                f"- Keep it concise and clear\n"
+                f"- Use markdown formatting if needed\n"
+                f"- Include a call to action if necessary",
+                reply_markup=InlineKeyboardMarkup().add(
+                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_mass_message")
+                )
+            )
+            await dp.current_state().set_state('waiting_for_mass_message')
+        except Exception as e:
+            logger.error(f"Error in prompt_mass_message: {e}")
+            await callback_query.message.edit_text(
+                "Sorry, there was an error preparing the mass message. Please try again later.",
+                reply_markup=admin_menu_markup
+            )
+    else:
+        await callback_query.answer("This feature is only available to administrators.")
+
+@dp.message_handler(state='waiting_for_mass_message')
+async def send_mass_message(message: types.Message, state):
+    if str(message.from_user.id) == str(admin):
+        try:
+            clients = get_clients_from_clients_table()
+            sent_count = 0
+            failed_count = 0
+            start_time = datetime.now()
+            
+            progress_message = await message.reply("Sending messages... 0%")
+            total_users = len(clients)
+            
+            for i, user_id in enumerate(clients, 1):
+                try:
+                    await bot.send_message(user_id, message.text)
+                    sent_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to send message to user {user_id}: {e}")
+                    failed_count += 1
+                
+                # Update progress every 10 users or at 100%
+                if i % 10 == 0 or i == total_users:
+                    progress = (i / total_users) * 100
+                    await progress_message.edit_text(
+                        f"Sending messages... {progress:.1f}%\n"
+                        f"Sent: {sent_count}\n"
+                        f"Failed: {failed_count}"
+                    )
+            
+            time_taken = (datetime.now() - start_time).total_seconds()
+            
+            await message.reply(
+                f"✅ Mass Message Summary:\n\n"
+                f"Total Users: {total_users}\n"
+                f"Successfully Sent: {sent_count}\n"
+                f"Failed: {failed_count}\n"
+                f"Time Taken: {time_taken:.1f} seconds",
+                reply_markup=admin_menu_markup
+            )
+        except Exception as e:
+            logger.error(f"Error in send_mass_message: {e}")
+            await message.reply(
+                "Sorry, there was an error sending the mass message. Please try again later.",
+                reply_markup=admin_menu_markup
+            )
     await state.finish()
-    await message.reply(
-        f"Рассылка завершена\n"
-        f"✅ Успешно отправлено: {sent_count}\n"
-        f"❌ Ошибок отправки: {failed_count}"
-    )
+
+@dp.callback_query_handler(lambda c: c.data == 'cancel_mass_message', state='waiting_for_mass_message')
+async def cancel_mass_message(callback_query: types.CallbackQuery, state):
+    try:
+        await state.finish()
+        await callback_query.message.edit_text(
+            "Mass message cancelled.",
+            reply_markup=admin_menu_markup
+        )
+    except Exception as e:
+        logger.error(f"Error cancelling mass message: {e}")
+        await callback_query.message.edit_text(
+            "Error cancelling mass message. Please try again.",
+            reply_markup=admin_menu_markup
+        )
 
 executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown)

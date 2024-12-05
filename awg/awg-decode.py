@@ -6,6 +6,9 @@ import argparse
 import socket
 import ipaddress
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 def qCompress(data, level=-1):
     compressed = zlib.compress(data, level)
@@ -13,17 +16,35 @@ def qCompress(data, level=-1):
     return header + compressed
 
 def qUncompress(data):
+    if not isinstance(data, bytes):
+        raise TypeError("Input data must be bytes")
+    
     if len(data) < 4:
         return b''
-    uncompressed_size = struct.unpack('>I', data[:4])[0]
-    compressed_data = data[4:]
+        
     try:
+        uncompressed_size = struct.unpack('>I', data[:4])[0]
+        compressed_data = data[4:]
+        
+        if not compressed_data:
+            return b''
+            
         uncompressed_data = zlib.decompress(compressed_data)
-    except zlib.error:
+        
+        if len(uncompressed_data) != uncompressed_size:
+            logger.warning("Uncompressed data size mismatch")
+            return b''
+            
+        return uncompressed_data
+    except struct.error as e:
+        logger.error(f"Error unpacking data size: {e}")
         return b''
-    if len(uncompressed_data) != uncompressed_size:
+    except zlib.error as e:
+        logger.error(f"Error decompressing data: {e}")
         return b''
-    return uncompressed_data
+    except Exception as e:
+        logger.error(f"Unexpected error in qUncompress: {e}")
+        return b''
 
 def base64url_encode(data):
     encoded = base64.urlsafe_b64encode(data)
@@ -42,10 +63,28 @@ def is_ip_address(address):
         return False
 
 def resolve_dns_to_ip(dns_name):
+    if not dns_name:
+        return None
+        
     try:
+        # Check if it's already an IP address
+        if is_ip_address(dns_name):
+            return dns_name
+            
+        # Try to resolve the DNS name
         ip_address = socket.gethostbyname(dns_name)
+        
+        # Validate the resolved IP
+        if not is_ip_address(ip_address):
+            logger.error(f"Invalid IP address resolved: {ip_address}")
+            return None
+            
         return ip_address
-    except socket.gaierror:
+    except socket.gaierror as e:
+        logger.error(f"DNS resolution error for {dns_name}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error resolving DNS {dns_name}: {e}")
         return None
 
 def process_conf_data(data):
@@ -76,15 +115,31 @@ def encode(data):
     return s
 
 def decode(s):
-    data = s.replace('vpn://', '')
-    data_bytes = data.encode('ascii')
-    compressed = base64url_decode(data_bytes)
-    uncompressed = qUncompress(compressed)
-    if uncompressed:
-        result = uncompressed
-    else:
-        result = compressed
-    return result.decode('utf-8')
+    if not isinstance(s, (str, bytes)):
+        raise TypeError("Input must be string or bytes")
+        
+    try:
+        # Convert string to bytes if needed
+        if isinstance(s, str):
+            s = s.encode()
+            
+        # Remove any whitespace
+        s = s.strip()
+        
+        # Decode base64
+        decoded = base64url_decode(s)
+        if not decoded:
+            raise ValueError("Failed to decode base64 data")
+            
+        # Decompress data
+        decompressed = qUncompress(decoded)
+        if not decompressed:
+            raise ValueError("Failed to decompress data")
+            
+        return decompressed.decode('utf-8')
+    except Exception as e:
+        logger.error(f"Error decoding data: {e}")
+        raise
 
 def main():
     parser = argparse.ArgumentParser(description='Encode and decode VPN configuration files to/from vpn:// format.')

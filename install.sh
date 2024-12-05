@@ -219,14 +219,14 @@ install_and_configure_needrestart() {
 }
 
 clone_repository() {
-    if [[ -d "python_bot_amnezia" ]]; then
+    if [[ -d "awg" ]]; then
         echo -e "\n${YELLOW}Репозиторий существует${NC}"
-        cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+        cd awg || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
         return 0
     fi
     
-    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git >/dev/null 2>&1"
-    cd python_bot_amnezia || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
+    run_with_spinner "Клонирование репозитория" "git clone https://github.com/IgnatTOP/python_bot_amnezia.git awg >/dev/null 2>&1"
+    cd awg || { echo -e "\n${RED}Ошибка перехода в директорию${NC}"; exit 1; }
 }
 
 setup_venv() {
@@ -235,7 +235,7 @@ setup_venv() {
         return 0
     fi
     
-    run_with_spinner "Настройка виртуального окружения" "python3.11 -m venv myenv && source myenv/bin/activate && pip install --upgrade pip && pip install -r $(pwd)/requirements.txt && deactivate"
+    run_with_spinner "Настройка виртуального окружения" "python3.11 -m venv myenv && source myenv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
 }
 
 set_permissions() {
@@ -246,52 +246,40 @@ set_permissions() {
 }
 
 initialize_bot() {
-    echo -e "${BLUE}Инициализация бота...${NC}"
-    
-    if [ -f "files/setting.ini" ]; then
-        read -p "Файл конфигурации уже существует. Хотите пересоздать его? (y/n): " recreate
-        if [ "$recreate" != "y" ]; then
-            echo -e "${GREEN}Используем существующий файл конфигурации${NC}"
-            return 0
-        fi
-    fi
-    
-    mkdir -p files
-    
-    read -p "Введите токен Telegram бота: " bot_token
-    read -p "Введите Telegram ID администратора: " admin_id
-    read -p "Введите Shop ID YooKassa: " yookassa_shop_id
-    read -p "Введите секретный ключ YooKassa: " yookassa_token
-    
-    docker_container=$(get_amnezia_container)
-    echo -e "${GREEN}Найден Docker-контейнер: $docker_container${NC}"
-    
-    cmd="docker exec $docker_container find / -name wg0.conf"
-    wg_config_file=$(eval "$cmd")
-    if [ -z "$wg_config_file" ]; then
-        echo -e "${YELLOW}Не удалось найти файл конфигурации WireGuard 'wg0.conf' в контейнере. Используется путь по умолчанию${NC}"
-        wg_config_file="/opt/amnezia/awg/wg0.conf"
-    fi
-    
-    endpoint=$(curl -s https://api.ipify.org)
-    if ! valid_ip "$endpoint"; then
-        echo -e "${YELLOW}Не удалось автоматически определить внешний IP-адрес${NC}"
-        read -p "Введите внешний IP-адрес сервера: " endpoint
-    fi
-    
-    cat > files/setting.ini << EOL
-[setting]
-bot_token = $bot_token
-admin_id = $admin_id
-docker_container = $docker_container
-wg_config_file = $wg_config_file
-endpoint = $endpoint
-yookassa_shop_id = $yookassa_shop_id
-yookassa_token = $yookassa_token
-EOL
-    
-    echo -e "${GREEN}Конфигурация сохранена в files/setting.ini${NC}"
-    return 0
+    run_with_spinner "Initializing bot configuration" "
+        cd $SCRIPT_DIR && \
+        source venv/bin/activate && \
+        mkdir -p files && \
+        python3 -c '
+import sys
+sys.path.append(\"awg\")
+import db
+import os
+import configparser
+
+config = configparser.ConfigParser()
+config.add_section(\"setting\")
+
+bot_token = \"7782664718:AAFkre94HlYW_RCDqA2YBUc8guo2B5-EpSM\"
+admin_id = \"487523019\"
+docker_container = db.get_amnezia_container()
+wg_config_file = \"/opt/amnezia/awg/wg0.conf\"
+endpoint = \"AmneziaVPNIZbot\"
+yookassa_shop_id = \"993270\"
+yookassa_token = \"test_cE-RElZLKakvb585wjrh9XAoqGSyS_rcmta2v1MdURE\"
+
+config.set(\"setting\", \"bot_token\", bot_token)
+config.set(\"setting\", \"admin_id\", admin_id)
+config.set(\"setting\", \"docker_container\", docker_container)
+config.set(\"setting\", \"wg_config_file\", wg_config_file)
+config.set(\"setting\", \"endpoint\", endpoint)
+config.set(\"setting\", \"yookassa_shop_id\", yookassa_shop_id)
+config.set(\"setting\", \"yookassa_token\", yookassa_token)
+
+with open(\"files/setting.ini\", \"w\") as config_file:
+    config.write(config_file)
+'
+    "
 }
 
 create_service() {
@@ -302,8 +290,8 @@ After=network.target
 
 [Service]
 User=$USER
-WorkingDirectory=$(pwd)/awg
-ExecStart=$(pwd)/myenv/bin/python3.11 bot_manager.py
+WorkingDirectory=$(pwd)
+ExecStart=$(pwd)/myenv/bin/python3.11 awg/bot_manager.py
 Restart=always
 
 [Install]

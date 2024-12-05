@@ -9,8 +9,6 @@ import tempfile
 from datetime import datetime
 
 EXPIRATIONS_FILE = 'files/expirations.json'
-PAYMENTS_FILE = 'files/payments.json'
-LICENSES_FILE = 'files/licenses.json'
 UTC = pytz.UTC
 
 logging.basicConfig(level=logging.INFO)
@@ -57,11 +55,16 @@ def create_config(path='files/setting.ini'):
         logger.error("Ошибка при определении внешнего IP-адреса сервера.")
         endpoint = input('Не удалось автоматически определить внешний IP-адрес. Пожалуйста, введите его вручную: ').strip()
 
+    yookassa_shop_id = input('Введите ID магазина YooKassa: ').strip()
+    yookassa_token = input('Введите токен YooKassa: ').strip()
+
     config.set("setting", "bot_token", bot_token)
     config.set("setting", "admin_id", admin_id)
     config.set("setting", "docker_container", docker_container)
     config.set("setting", "wg_config_file", wg_config_file)
     config.set("setting", "endpoint", endpoint)
+    config.set("setting", "yookassa_shop_id", yookassa_shop_id)
+    config.set("setting", "yookassa_token", yookassa_token)
 
     with open(path, "w") as config_file:
         config.write(config_file)
@@ -144,15 +147,70 @@ def ensure_peer_names():
 
 def get_config(path='files/setting.ini'):
     if not os.path.exists(path):
-        create_config(path)
-
+        logger.error(f"Configuration file not found at {path}")
+        raise FileNotFoundError(f"Configuration file not found at {path}")
+        
     config = configparser.ConfigParser()
-    config.read(path)
-    out = {}
-    for key in config['setting']:
-        out[key] = config['setting'][key]
+    try:
+        config.read(path)
+        
+        required_settings = [
+            'bot_token', 'admin_id', 'yookassa_shop_id', 
+            'yookassa_token', 'payment_return_url'
+        ]
+        
+        for setting in required_settings:
+            if not config.has_option('setting', setting):
+                logger.error(f"Missing required setting: {setting}")
+                raise ValueError(f"Configuration is missing required setting: {setting}")
+        
+        return config['setting']
+    except configparser.Error as e:
+        logger.error(f"Error reading configuration file: {e}")
+        raise
 
-    return out
+def get_clients_from_clients_table():
+    try:
+        docker_container = get_amnezia_container()
+        cmd = f"docker exec {docker_container} cat /opt/amnezia/awg/clients.json"
+        
+        output = subprocess.check_output(cmd, shell=True).decode()
+        if not output.strip():
+            logger.warning("Empty clients.json file")
+            return {}
+            
+        clients = json.loads(output)
+        if not isinstance(clients, dict):
+            logger.error("Invalid clients.json format - expected dictionary")
+            return {}
+            
+        # Validate and clean client data
+        validated_clients = {}
+        for user_id, client_data in clients.items():
+            try:
+                if not isinstance(client_data, dict):
+                    logger.warning(f"Invalid client data format for user {user_id}")
+                    continue
+                    
+                # Ensure required fields exist
+                required_fields = ['created_at']
+                if all(field in client_data for field in required_fields):
+                    validated_clients[str(user_id)] = client_data
+                else:
+                    logger.warning(f"Missing required fields for user {user_id}")
+            except Exception as e:
+                logger.error(f"Error processing client data for user {user_id}: {e}")
+                
+        return validated_clients
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error reading clients.json: {e}")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing clients.json: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error reading clients: {e}")
+        return {}
 
 def save_client_endpoint(username, endpoint):
     os.makedirs('files/connections', exist_ok=True)
@@ -384,84 +442,3 @@ def get_user_expiration(username: str):
 def get_user_traffic_limit(username: str):
     expirations = load_expirations()
     return expirations.get(username, {}).get('traffic_limit', "Неограниченно")
-
-# Payment and license related functions
-
-def load_payments():
-    if os.path.exists(PAYMENTS_FILE):
-        try:
-            with open(PAYMENTS_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            return []
-    return []
-
-def save_payments(payments):
-    os.makedirs(os.path.dirname(PAYMENTS_FILE), exist_ok=True)
-    with open(PAYMENTS_FILE, 'w') as f:
-        json.dump(payments, f, indent=4)
-
-def add_payment(user_id, amount, payment_id, status='pending'):
-    payments = load_payments()
-    payment = {
-        'user_id': user_id,
-        'amount': amount,
-        'payment_id': payment_id,
-        'status': status,
-        'timestamp': datetime.now(UTC).isoformat()
-    }
-    payments.append(payment)
-    save_payments(payments)
-    return payment
-
-def update_payment_status(payment_id, status):
-    payments = load_payments()
-    for payment in payments:
-        if payment['payment_id'] == payment_id:
-            payment['status'] = status
-            payment['updated_at'] = datetime.now(UTC).isoformat()
-            save_payments(payments)
-            return True
-    return False
-
-def get_user_payments(user_id):
-    payments = load_payments()
-    return [p for p in payments if p['user_id'] == user_id]
-
-def get_all_payments():
-    return load_payments()
-
-def load_licenses():
-    if os.path.exists(LICENSES_FILE):
-        try:
-            with open(LICENSES_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_licenses(licenses):
-    os.makedirs(os.path.dirname(LICENSES_FILE), exist_ok=True)
-    with open(LICENSES_FILE, 'w') as f:
-        json.dump(licenses, f, indent=4)
-
-def add_user_license(user_id):
-    licenses = load_licenses()
-    licenses[str(user_id)] = {
-        'active': True,
-        'created_at': datetime.now(UTC).isoformat()
-    }
-    save_licenses(licenses)
-
-def check_user_license(user_id):
-    licenses = load_licenses()
-    return str(user_id) in licenses and licenses[str(user_id)]['active']
-
-def revoke_user_license(user_id):
-    licenses = load_licenses()
-    if str(user_id) in licenses:
-        licenses[str(user_id)]['active'] = False
-        licenses[str(user_id)]['revoked_at'] = datetime.now(UTC).isoformat()
-        save_licenses(licenses)
-        return True
-    return False
